@@ -1,3 +1,5 @@
+import { broadcastTrade, broadcastPortfolio, broadcastRiskEvent, broadcastKillSwitch } from "./websocket";
+import { getAgentHealth, getAgentMetrics, getAgentStatus } from "./agent";
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
@@ -414,6 +416,34 @@ export async function registerRoutes(
   if (!config) {
     await seedDemoData();
   }
+
+
+  // ═══════════════════════════════════════════════
+  // AGENT PROXY (Python engine)
+  // ═══════════════════════════════════════════════
+
+  app.get("/api/agent/health", async (_req, res) => {
+    const health = await getAgentHealth();
+    res.json(health);
+  });
+
+  app.get("/api/agent/metrics", async (_req, res) => {
+    const metrics = await getAgentMetrics();
+    if (metrics) {
+      res.type("text/plain").send(metrics);
+    } else {
+      res.status(503).json({ error: "Agent metrics unavailable" });
+    }
+  });
+
+  app.get("/api/agent/status", async (_req, res) => {
+    const status = await getAgentStatus();
+    if (status) {
+      res.json(status);
+    } else {
+      res.status(503).json({ error: "Agent status unavailable" });
+    }
+  });
 
   return httpServer;
 }
