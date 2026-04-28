@@ -38,3 +38,34 @@
     return { score: 0, summary: msg.slice(0, 200) };
   }
 }
+
+/** Ollama /api/chat (non-streaming). */
+export async function fetchOllamaChat(
+  baseUrl: string,
+  model: string,
+  systemPrompt: string,
+  messages: { role: "user" | "assistant"; content: string }[],
+): Promise<string> {
+  const root = baseUrl.replace(/\/$/, "");
+  const body = {
+    model,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    stream: false,
+    options: { temperature: 0.35, num_predict: 1024 },
+  };
+  try {
+    const res = await fetch(`${root}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) return `[Ollama chat HTTP ${res.status}]`;
+    const j = (await res.json()) as { message?: { content?: string } };
+    const text = j.message?.content ?? "";
+    return text.trim() || "(empty response)";
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "ollama chat error";
+    return msg.slice(0, 500);
+  }
+}

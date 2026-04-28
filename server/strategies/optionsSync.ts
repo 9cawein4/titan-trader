@@ -8,6 +8,14 @@ export function isLikelyOptionSymbol(symbol: string): boolean {
   return /^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(symbol);
 }
 
+/** Root ticker before the OCC date segment (e.g. AAPL from AAPL240119C00150000). */
+export function extractUnderlyingFromOcc(symbol: string): string | null {
+  const idx = symbol.search(/\d{6}[CP]/);
+  if (idx <= 0) return null;
+  const root = symbol.slice(0, idx);
+  return root.length > 0 ? root : null;
+}
+
 export function parseOccSymbol(symbol: string): { strike: number; expiration: string; optionType: "call" | "put" } {
   const idx = symbol.search(/\d{6}[CP]/);
   if (idx <= 0) return { strike: 0, expiration: "unknown", optionType: "put" };

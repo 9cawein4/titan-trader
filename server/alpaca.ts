@@ -174,3 +174,57 @@ export async function getOptionSnapshots(
 }
 
 
+
+export type AlpacaOptionContract = {
+  symbol: string;
+  expiration_date?: string;
+  strike_price?: string;
+  type?: "call" | "put";
+  open_interest?: string;
+  status?: string;
+  tradable?: boolean;
+};
+
+export async function getOptionContracts(
+  creds: AlpacaCredentials,
+  underlying: string,
+  optionType: "call" | "put",
+  expirationDateGte: string,
+  expirationDateLte: string,
+  limit = 80,
+): Promise<AlpacaOptionContract[]> {
+  const params = new URLSearchParams({
+    underlying_symbols: underlying,
+    type: optionType,
+    status: "active",
+    expiration_date_gte: expirationDateGte,
+    expiration_date_lte: expirationDateLte,
+    tradable: "true",
+    limit: String(Math.min(200, Math.max(1, Math.round(limit)))),
+  });
+  const r = await tradeJson<{ option_contracts?: AlpacaOptionContract[] }>(
+    creds,
+    "/v2/options/contracts?" + params.toString(),
+  );
+  return r.ok && Array.isArray(r.data?.option_contracts) ? r.data.option_contracts : [];
+}
+
+export type AlpacaAssetRow = {
+  id: string;
+  class: string;
+  exchange: string;
+  symbol: string;
+  name: string;
+  status: string;
+  tradable: boolean;
+};
+
+/** Active US equities from Alpaca asset master list (tradable subset). */
+export async function fetchTradableUsEquityAssets(creds: AlpacaCredentials): Promise<AlpacaAssetRow[]> {
+  const p = new URLSearchParams({ status: "active", asset_class: "us_equity" });
+  const r = await tradeJson<AlpacaAssetRow[]>(creds, `/v2/assets?${p.toString()}`);
+  if (!r.ok || !Array.isArray(r.data)) return [];
+  return r.data.filter(
+    (row) => row.tradable && row.status === "active" && row.class === "us_equity",
+  );
+}

@@ -8,6 +8,7 @@ import {
   type RiskEvent, type InsertRiskEvent, riskEvents,
   type SentimentEntry, type InsertSentimentEntry, sentimentEntries,
   type AuditLog, type InsertAuditLog, auditLog,
+  type DecisionLog, type InsertDecisionLog, decisionLogs,
   type SystemStatus, type InsertSystemStatus, systemStatus,
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -19,6 +20,26 @@ const sqlite = new Database(resolveDbPath());
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 sqlite.pragma("synchronous = NORMAL");
+
+function ensureDecisionLogsTable(): void {
+  const row = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'decision_logs'")
+    .get() as { name: string } | undefined;
+  if (row) return;
+  sqlite.exec(`
+    CREATE TABLE decision_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      timestamp TEXT NOT NULL,
+      trading_mode TEXT NOT NULL,
+      category TEXT NOT NULL,
+      underlying_symbol TEXT NOT NULL,
+      strategy TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      hmac_signature TEXT
+    );
+  `);
+}
+ensureDecisionLogsTable();
 
 export const db = drizzle(sqlite);
 
@@ -66,6 +87,9 @@ export interface IStorage {
   // Audit
   getAuditLog(limit?: number): Promise<AuditLog[]>;
   createAuditEntry(entry: InsertAuditLog): Promise<AuditLog>;
+
+  getDecisionLogs(mode: string, limit?: number, category?: string): Promise<DecisionLog[]>;
+  createDecisionLog(entry: InsertDecisionLog): Promise<DecisionLog>;
 
   // System Status
   getSystemStatuses(): Promise<SystemStatus[]>;
@@ -195,6 +219,27 @@ export class DatabaseStorage implements IStorage {
   }
   async createAuditEntry(entry: InsertAuditLog): Promise<AuditLog> {
     return db.insert(auditLog).values(entry).returning().get();
+  }
+  async getDecisionLogs(mode: string, limit = 200, category?: string): Promise<DecisionLog[]> {
+    if (category) {
+      return db
+        .select()
+        .from(decisionLogs)
+        .where(and(eq(decisionLogs.tradingMode, mode), eq(decisionLogs.category, category)))
+        .orderBy(desc(decisionLogs.timestamp))
+        .limit(limit)
+        .all();
+    }
+    return db
+      .select()
+      .from(decisionLogs)
+      .where(eq(decisionLogs.tradingMode, mode))
+      .orderBy(desc(decisionLogs.timestamp))
+      .limit(limit)
+      .all();
+  }
+  async createDecisionLog(entry: InsertDecisionLog): Promise<DecisionLog> {
+    return db.insert(decisionLogs).values(entry).returning().get();
   }
 
   // ─── System Status ───

@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+﻿import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { useTradingMode } from "@/lib/tradingContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +13,7 @@ import {
   BarChart3,
   Zap,
   Minus,
+  CircleDollarSign,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -321,6 +323,20 @@ export default function Dashboard() {
 
   return (
     <div className="p-4 lg:p-6 space-y-4" data-testid="page-dashboard">
+      <Link href="/execute">
+        <div
+          className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3 text-sm hover:bg-primary/10 transition-colors cursor-pointer"
+          data-testid="page-dashboard-execute-hint"
+        >
+          <CircleDollarSign className="w-5 h-5 text-primary shrink-0" />
+          <div>
+            <p className="font-semibold text-foreground">Execute a trade</p>
+            <p className="text-xs text-muted-foreground">
+              Place market equity orders on Alpaca (manual). Use START in the sidebar for automated cycles.
+            </p>
+          </div>
+        </div>
+      </Link>
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <KpiCard

@@ -1,4 +1,4 @@
-﻿import type { TradingConfig } from "@shared/schema";
+import type { TradingConfig } from "@shared/schema";
 import { storage } from "./storage";
 import { decryptSecret, hmacSignPayload } from "./secrets";
 import * as alpaca from "./alpaca";
@@ -19,6 +19,9 @@ import { broadcastPortfolio, broadcastTrade } from "./websocket";
 
 import { refreshStrategyPerformance } from "./strategyMetrics";
 import { syncOptionPositionsFromBroker } from "./strategies/optionsSync";
+import { manageOptionsExits } from "./strategies/optionsExit";
+import { logTradeDecision } from "./strategies/optionsDecision";
+import { runOptionsAutonomy } from "./strategies/optionsAutonomy";
 
 const CYCLE_MS = Math.max(30_000, parseInt(process.env.TITAN_CYCLE_SECONDS || "90", 10) * 1000);
 
@@ -176,6 +179,32 @@ async function weeklyEquityDropBreach(mode: string, cfg: TradingConfig): Promise
   return chg < -(cfg.weeklyLossLimit ?? 0.07);
 }
 
+async function syncRiskEvent(
+  eventType: "daily_limit" | "weekly_limit" | "drawdown" | "position_limit",
+  breached: boolean,
+  severity: "warning" | "critical" | "halt",
+  message: string,
+  currentValue: number,
+  threshold: number,
+): Promise<void> {
+  const active = await storage.getActiveRiskEvents();
+  const existing = active.find((e) => e.eventType === eventType);
+  if (breached && !existing) {
+    await storage.createRiskEvent({
+      timestamp: new Date().toISOString(),
+      eventType,
+      severity,
+      message,
+      currentValue,
+      threshold,
+      resolved: 0,
+    });
+    return;
+  }
+  if (!breached && existing) {
+    await storage.resolveRiskEvent(existing.id);
+  }
+}
 async function processCycle(): Promise<void> {
   const t0 = Date.now();
   try {
@@ -200,8 +229,14 @@ async function processCycle(): Promise<void> {
       log(`options sync: ${e instanceof Error ? e.message : String(e)}`, "engine");
     }
 
+    try {
+      await manageOptionsExits(mode, creds, cfg);
+    } catch (e) {
+      log(`options exits: ${e instanceof Error ? e.message : String(e)}`, "engine");
+    }
+
     if (await killSwitchEngaged()) {
-      await updateOrchestrator("Kill switch active — skipping signals", Date.now() - t0);
+      await updateOrchestrator("Kill switch active - skipping signals", Date.now() - t0);
       state.lastCycleAt = new Date().toISOString();
       state.lastCycleMs = Date.now() - t0;
       state.cyclesCompleted++;
@@ -211,7 +246,7 @@ async function processCycle(): Promise<void> {
     const cfgLimits = cfg;
     const snap = await storage.getLatestSnapshot(mode);
     const eq = snap?.equity ?? equity;
-    const dayLossPct = snap?.dayPnl != null && eq > 0 ? Math.abs(snap.dayPnl) / eq : 0;
+    const dayLossPct = snap?.dayPnl != null && snap.dayPnl < 0 && eq > 0 ? -snap.dayPnl / eq : 0;
     const dayBreach = dayLossPct > (cfgLimits.dailyLossLimit ?? 0.03);
     const weekBreach = await weeklyEquityDropBreach(mode, cfgLimits);
     const ddBreach = (snap?.drawdown ?? 0) > (cfgLimits.maxDrawdown ?? 0.15);
@@ -275,7 +310,52 @@ async function processCycle(): Promise<void> {
     const posPct = eq > 0 && pos ? (pos.marketValue ?? 0) / eq : 0;
     const overPos = posPct > 0.1;
 
+    await syncRiskEvent(
+      "daily_limit",
+      dayBreach,
+      "halt",
+      `Daily loss limit breached (${(dayLossPct * 100).toFixed(2)}%)`,
+      dayLossPct,
+      cfgLimits.dailyLossLimit ?? 0.03,
+    );
+    await syncRiskEvent(
+      "weekly_limit",
+      weekBreach,
+      "halt",
+      "Weekly rolling equity drop breached",
+      snap?.drawdown ?? 0,
+      cfgLimits.weeklyLossLimit ?? 0.07,
+    );
+    await syncRiskEvent(
+      "drawdown",
+      ddBreach,
+      "halt",
+      `Max drawdown breached (${((snap?.drawdown ?? 0) * 100).toFixed(2)}%)`,
+      snap?.drawdown ?? 0,
+      cfgLimits.maxDrawdown ?? 0.15,
+    );
+    await syncRiskEvent(
+      "position_limit",
+      overExpose,
+      "critical",
+      `Portfolio exposure too high (${(exposure * 100).toFixed(2)}%)`,
+      exposure,
+      cfg.maxPortfolioExposure ?? 0.6,
+    );
+
     const canTrade = state.running && !overExpose && !dayBreach && !weekBreach && !ddBreach;
+
+
+    await runOptionsAutonomy(
+      mode,
+      cfg,
+      creds,
+      symbol,
+      closes,
+      ensNorm,
+      sent.score,
+      canTrade,
+    );
 
     if (canTrade && ensNorm > threshold && sent.score > -0.35 && !pos && !overPos) {
       const riskCash = eq * (cfg.maxRiskPerTrade ?? 0.02);
@@ -284,6 +364,15 @@ async function processCycle(): Promise<void> {
       if (qty < 1 && riskCash >= price * 0.99) qty = 1;
 
       if (qty >= 1 && price > 1) {
+        await logTradeDecision(mode, "equity_signal", symbol, "ensemble", {
+          phase: "pre",
+          side: "buy",
+          ensNorm,
+          sentiment: sent.score,
+          threshold,
+          qty,
+          price,
+        });
         const order = await alpaca.submitMarketOrder(creds, symbol, qty, "buy");
         const ts = new Date().toISOString();
         const sig = hmacSignPayload(`${ts}:${symbol}:buy:${order?.id}`);
@@ -303,8 +392,24 @@ async function processCycle(): Promise<void> {
           hmacSignature: sig,
         });
         if (order?.id) broadcastTrade({ symbol, side: "buy", qty });
+        await logTradeDecision(mode, "equity_signal", symbol, "ensemble", {
+          phase: "post",
+          side: "buy",
+          ok: Boolean(order?.id),
+          orderId: order?.id ?? null,
+          qty,
+        });
       }
     } else if (canTrade && ensNorm < -threshold && sent.score < 0.25 && pos && pos.qty > 0) {
+      await logTradeDecision(mode, "equity_signal", symbol, "ensemble", {
+        phase: "pre",
+        side: "sell",
+        ensNorm,
+        sentiment: sent.score,
+        threshold,
+        qty: pos.qty,
+        price: closes.at(-1) ?? 0,
+      });
       const order = await alpaca.submitMarketOrder(creds, symbol, pos.qty, "sell");
       const ts = new Date().toISOString();
       const sig = hmacSignPayload(`${ts}:${symbol}:sell:${order?.id}`);
@@ -324,6 +429,13 @@ async function processCycle(): Promise<void> {
         hmacSignature: sig,
       });
       if (order?.id) broadcastTrade({ symbol, side: "sell", qty: pos.qty });
+      await logTradeDecision(mode, "equity_signal", symbol, "ensemble", {
+        phase: "post",
+        side: "sell",
+        ok: Boolean(order?.id),
+        orderId: order?.id ?? null,
+        qty: pos.qty,
+      });
     }
 
     await syncFromBroker(mode, creds);
@@ -333,7 +445,7 @@ async function processCycle(): Promise<void> {
       /* ignore metrics refresh errors */
     }
     await updateOrchestrator(
-      `Cycle OK — ${symbol} ensemble ${ensNorm.toFixed(2)} / ${threshold}`,
+      `Cycle OK - ${symbol} ensemble ${ensNorm.toFixed(2)} / ${threshold}`,
       Date.now() - t0,
     );
 
@@ -389,7 +501,7 @@ export function startEngine(): void {
     void processCycle();
   }, CYCLE_MS);
   void processCycle();
-  log(`Trading engine started — cycle ${CYCLE_MS / 1000}s`, "engine");
+  log(`Trading engine started - cycle ${CYCLE_MS / 1000}s`, "engine");
 }
 
 export function stopEngine(): void {
@@ -400,3 +512,12 @@ export function stopEngine(): void {
   }
   log("Trading engine stopped", "engine");
 }
+
+
+
+
+
+
+
+
+

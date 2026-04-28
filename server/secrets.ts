@@ -1,9 +1,16 @@
-﻿import crypto from "crypto";
+import crypto from "crypto";
 
 const IV_LENGTH = 16;
+const HEX_64_RE = /^[0-9a-fA-F]{64}$/;
+const cachedKeyHex = (() => {
+  const envKey = process.env.TITAN_ENCRYPTION_KEY?.trim();
+  if (envKey && HEX_64_RE.test(envKey)) return envKey.toLowerCase();
+  // Ephemeral per-process fallback: stable for runtime, not persisted across restarts.
+  return crypto.randomBytes(32).toString("hex");
+})();
 
 export function getEncryptionKeyHex(): string {
-  return process.env.TITAN_ENCRYPTION_KEY || crypto.randomBytes(32).toString("hex");
+  return cachedKeyHex;
 }
 
 export function encryptSecret(text: string): string {
@@ -33,5 +40,5 @@ export function decryptSecret(text: string): string {
 
 export function hmacSignPayload(data: string): string {
   const keyHex = getEncryptionKeyHex();
-  return crypto.createHmac("sha256", keyHex.slice(0, 32)).update(data).digest("hex");
+  return crypto.createHmac("sha256", Buffer.from(keyHex, "hex")).update(data).digest("hex");
 }

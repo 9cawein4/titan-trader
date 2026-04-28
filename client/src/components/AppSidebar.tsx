@@ -1,6 +1,7 @@
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
+  CircleDollarSign,
   ShieldAlert,
   ScrollText,
   Settings,
@@ -29,6 +30,7 @@ import { useToast } from "@/hooks/use-toast";
 
 const navItems = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
+  { path: "/execute", label: "Execute", icon: CircleDollarSign },
   { path: "/risk", label: "Risk Mgmt", icon: ShieldAlert },
   { path: "/trades", label: "Trade Log", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },

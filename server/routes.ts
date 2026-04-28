@@ -7,6 +7,12 @@ import { registerEngineRoutes, onKillSwitchActivate } from "./engine-api";
 import { z } from "zod";
 import { encryptSecret as encrypt, hmacSignPayload as hmacSign } from "./secrets";
 import { log } from "./log";
+import * as alpaca from "./alpaca";
+import { credsFromTradingConfig } from "./brokerCreds";
+import { filterSymbolSuggestions, getEquitySymbolUniverse, invalidateSymbolUniverseCache } from "./symbolSuggest";
+import { getEngineState } from "./trading-engine";
+import { runExecuteAdvisor } from "./executeAdvisor";
+import type { AdvisorMessage } from "./executeAdvisor";
 import {
   insertTradingConfigSchema,
   tradingModeSchema,
@@ -27,6 +33,26 @@ import {
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT = 100; // requests per window
 const RATE_WINDOW = 60_000; // 1 minute
+const chatRateMap = new Map<string, { count: number; resetTime: number }>();
+const CHAT_RATE_LIMIT = 20;
+const CHAT_RATE_WINDOW = 60_000;
+
+function checkAdvisorChatRate(req: Request, res: Response): boolean {
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  const entry = chatRateMap.get(ip);
+  if (!entry || now > entry.resetTime) {
+    chatRateMap.set(ip, { count: 1, resetTime: now + CHAT_RATE_WINDOW });
+    return true;
+  }
+  entry.count++;
+  if (entry.count > CHAT_RATE_LIMIT) {
+    res.status(429).json({ error: "Advisor chat rate limit. Try again shortly." });
+    return false;
+  }
+  return true;
+}
+const configPatchSchema = insertTradingConfigSchema.partial().strict();
 
 function rateLimiter(req: Request, res: Response, next: NextFunction) {
   const ip = req.ip || req.socket.remoteAddress || "unknown";
@@ -131,16 +157,23 @@ export async function registerRoutes(
 
   app.patch("/api/config", async (req, res) => {
     try {
-      const data = req.body;
-      // Validate risk limits have hard caps
-      if (data.maxRiskPerTrade !== undefined && data.maxRiskPerTrade > 0.05) {
-        return res.status(400).json({ error: "Max risk per trade cannot exceed 5%" });
+      const parsed = configPatchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.flatten() });
       }
-      if (data.maxDrawdown !== undefined && data.maxDrawdown > 0.20) {
-        return res.status(400).json({ error: "Max drawdown cannot exceed 20%" });
+
+      const data = parsed.data;
+      if (typeof data.watchlist === "string") {
+        data.watchlist = data.watchlist
+          .split(",")
+          .map((s) => sanitizeString(s.toUpperCase()))
+          .filter(Boolean)
+          .slice(0, 64)
+          .join(",");
       }
-      const config = await storage.upsertTradingConfig(data);
-      await logAudit("config_update", JSON.stringify(redactSensitive(data)), req);
+
+      const config = await storage.upsertTradingConfig(data as any);
+      await logAudit("config_update", JSON.stringify(redactSensitive(data as Record<string, unknown>)), req);
       res.json(config);
     } catch (e) {
       res.status(400).json({ error: "Invalid config data" });
@@ -193,6 +226,7 @@ export async function registerRoutes(
       }
 
       await storage.upsertTradingConfig(update as any);
+      invalidateSymbolUniverseCache();
       await logAudit("api_keys_update", `Updated ${tradingMode} API keys`, req);
       res.json({ success: true, message: `${tradingMode} API keys saved (encrypted)` });
     } catch (e) {
@@ -309,9 +343,183 @@ export async function registerRoutes(
     res.json(tradeList);
   });
 
+  app.get("/api/symbols/suggest", async (req, res) => {
+    try {
+      const q = typeof req.query.q === "string" ? req.query.q : "";
+      const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "15"), 10) || 15, 1), 40);
+      if (q.trim().length < 1) {
+        return res.json([]);
+      }
+      const uni = await getEquitySymbolUniverse();
+      if (!uni.ok) {
+        return res.status(400).json({ error: uni.error });
+      }
+      const items = filterSymbolSuggestions(uni.entries, q, limit);
+      res.json(items);
+    } catch (e) {
+      log(`GET /api/symbols/suggest: ${e instanceof Error ? e.message : String(e)}`, "express");
+      res.status(500).json({ error: "Symbol suggest failed" });
+    }
+  });
+
+  const manualEquityOrderSchema = z.object({
+    symbol: z
+      .string()
+      .min(1)
+      .max(32)
+      .transform((x) => x.trim().toUpperCase())
+      .refine((x) => /^[A-Z0-9.-]+$/.test(x), "Invalid symbol"),
+    qty: z.number().int().positive().max(500_000),
+    side: z.enum(["buy", "sell"]),
+  });
+
+  app.post("/api/orders/equity", async (req, res) => {
+    try {
+      const parsed = manualEquityOrderSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid order", details: parsed.error.flatten() });
+      }
+
+      const risk = await storage.getActiveRiskEvents();
+      if (risk.some((e) => e.eventType === "kill_switch" && e.severity === "halt")) {
+        return res.status(403).json({ error: "Kill switch is active — orders are blocked" });
+      }
+
+      const cfg = await storage.getTradingConfig();
+      const credsR = credsFromTradingConfig(cfg);
+      if (!credsR.ok) {
+        return res.status(400).json({ error: credsR.error });
+      }
+      const { creds, mode } = credsR;
+
+      const { symbol, qty, side } = parsed.data;
+      const bars = await alpaca.getStockBars(creds, symbol, "15Min", 2);
+      const price = bars.length ? (bars[bars.length - 1]?.c ?? 0) : 0;
+
+      const order = await alpaca.submitMarketOrder(creds, symbol, qty, side);
+      const ts = new Date().toISOString();
+      const sig = hmacSign(`${ts}:${symbol}:${side}:${order?.id ?? "none"}`);
+      await storage.createTrade({
+        timestamp: ts,
+        symbol,
+        side,
+        orderType: "market",
+        qty,
+        price,
+        status: order?.id ? "executed" : "rejected",
+        strategy: "manual_ui",
+        reason: order?.id ? `Manual ${side} from dashboard` : "Order not accepted by broker",
+        pnl: null,
+        tradingMode: mode,
+        tradeType: "equity",
+        hmacSignature: sig,
+      });
+
+      if (order?.id) {
+        broadcastTrade({ symbol, side, qty });
+      }
+
+      await logAudit(
+        "manual_equity_order",
+        `${side} ${qty} ${symbol} ${mode} ok=${Boolean(order?.id)}`,
+        req,
+      );
+
+      res.json({
+        success: Boolean(order?.id),
+        orderId: order?.id ?? null,
+        symbol,
+        qty,
+        side,
+        tradingMode: mode,
+      });
+    } catch (e) {
+      log(`POST /api/orders/equity: ${e instanceof Error ? e.message : String(e)}`, "express");
+      res.status(500).json({ error: "Order failed" });
+    }
+  });
+
+
   // ═══════════════════════════════════════════════
   // STRATEGIES
   // ═══════════════════════════════════════════════
+
+  const executeAdvisorSchema = z.object({
+    messages: z
+      .array(
+        z.object({
+          role: z.enum(["user", "assistant"]),
+          content: z.string().min(1).max(8000),
+        }),
+      )
+      .min(1)
+      .max(24),
+    draft: z
+      .object({
+        symbol: z.string().max(32).optional(),
+        qty: z.number().int().positive().max(500_000).optional(),
+        side: z.enum(["buy", "sell"]).optional(),
+      })
+      .optional(),
+  });
+
+  app.post("/api/execute/advisor", async (req, res) => {
+    if (!checkAdvisorChatRate(req, res)) return;
+    try {
+      const parsed = executeAdvisorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      }
+      const last = parsed.data.messages[parsed.data.messages.length - 1];
+      if (last.role !== "user") {
+        return res.status(400).json({ error: "Last message must be from the user" });
+      }
+
+      const cfg = await storage.getTradingConfig();
+      if (!cfg) {
+        return res.status(400).json({ error: "Configure Settings first" });
+      }
+
+      const strats = await storage.getStrategies();
+      const strategies = strats.map((x) => ({
+        name: x.name,
+        enabled: Boolean(x.enabled),
+      }));
+
+      const risk = await storage.getActiveRiskEvents();
+      const killSwitchActive = risk.some((e) => e.eventType === "kill_switch" && e.severity === "halt");
+
+      const engine = getEngineState();
+
+      const msgs: AdvisorMessage[] = parsed.data.messages.map((m) => ({
+        role: m.role,
+        content: sanitizeString(m.content).slice(0, 8000),
+      }));
+
+      const out = await runExecuteAdvisor(
+        {
+          cfg,
+          strategies,
+          engineRunning: engine.running,
+          killSwitchActive,
+          draft: parsed.data.draft,
+        },
+        msgs,
+      );
+
+      await logAudit(
+        "execute_advisor_chat",
+        sanitizeString(msgs.filter((m) => m.role === "user").pop()?.content ?? "").slice(0, 220),
+        req,
+      );
+
+      res.json({ reply: out.reply });
+    } catch (e) {
+      log(`POST /api/execute/advisor: ${e instanceof Error ? e.message : String(e)}`, "express");
+      res.status(500).json({ error: "Advisor request failed" });
+    }
+  });
+
 
   app.get("/api/strategies", async (_req, res) => {
     const strats = await storage.getStrategies();
@@ -373,6 +581,18 @@ export async function registerRoutes(
     const limit = Math.min(parseInt(req.query.limit as string) || 100, 500);
     const entries = await storage.getAuditLog(limit);
     res.json(entries);
+  });
+
+  app.get("/api/decisions/:mode", async (req, res) => {
+    const mode = req.params.mode;
+    if (mode !== "paper" && mode !== "live") {
+      return res.status(400).json({ error: "Mode must be paper or live" });
+    }
+    const limit = Math.min(parseInt(req.query.limit as string) || 200, 500);
+    const catRaw = typeof req.query.category === "string" ? req.query.category.trim() : "";
+    const category = /^[a-z][a-z0-9_]{0,31}$/.test(catRaw) ? catRaw : undefined;
+    const rows = await storage.getDecisionLogs(mode, limit, category);
+    res.json(rows);
   });
 
   // ═══════════════════════════════════════════════
@@ -599,3 +819,4 @@ async function seedDemoData() {
     } as any);
   }
 }
+

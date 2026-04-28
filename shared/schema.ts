@@ -182,6 +182,24 @@ export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
 export type AuditLog = typeof auditLog.$inferSelect;
 
 // ─── System Status ───
+
+
+// Trade decision audit (structured JSON for reproducibility)
+export const decisionLogs = sqliteTable("decision_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  timestamp: text("timestamp").notNull(),
+  tradingMode: text("trading_mode").notNull(),
+  category: text("category").notNull(),
+  underlyingSymbol: text("underlying_symbol").notNull(),
+  strategy: text("strategy").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  hmacSignature: text("hmac_signature"),
+});
+
+export const insertDecisionLogSchema = createInsertSchema(decisionLogs).omit({ id: true });
+export type InsertDecisionLog = z.infer<typeof insertDecisionLogSchema>;
+export type DecisionLog = typeof decisionLogs.$inferSelect;
+
 export const systemStatus = sqliteTable("system_status", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   component: text("component").notNull(), // "broker" | "ollama" | "database" | "orchestrator"
@@ -211,3 +229,4 @@ export const apiKeySchema = z.object({
   apiKey: z.string().min(10).max(100),
   apiSecret: z.string().min(10).max(100),
 });
+
