@@ -1,12 +1,9 @@
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
-  Brain,
-  Layers,
   ShieldAlert,
   ScrollText,
   Settings,
-  Zap,
   Activity,
   OctagonX,
   Play,
@@ -27,14 +24,11 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { apiRequest } from "@/lib/queryClient";
-import { queryClient } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
 const navItems = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
-  { path: "/strategies", label: "Strategies", icon: Brain },
-  { path: "/options", label: "Options", icon: Layers },
   { path: "/risk", label: "Risk Mgmt", icon: ShieldAlert },
   { path: "/trades", label: "Trade Log", icon: ScrollText },
   { path: "/settings", label: "Settings", icon: Settings },
@@ -42,7 +36,7 @@ const navItems = [
 
 export default function AppSidebar() {
   const [location] = useLocation();
-  const { mode, killSwitchActive, setKillSwitchActive, isTrading, setIsTrading } = useTradingMode();
+  const { mode, killSwitchActive, setKillSwitchActive, isTrading, setIsTrading, engineLastError } = useTradingMode();
   const { toast } = useToast();
 
   const handleKillSwitch = async () => {
@@ -52,29 +46,47 @@ export default function AppSidebar() {
       if (action === "deactivate") body.confirmation = "RESUME TRADING";
       await apiRequest("POST", "/api/kill-switch", body);
       setKillSwitchActive(!killSwitchActive);
-      setIsTrading(false);
+      if (action === "activate") setIsTrading(false);
       queryClient.invalidateQueries({ queryKey: ["/api/risk"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/risk/active"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/engine"] });
       toast({
         title: killSwitchActive ? "Trading Resumed" : "KILL SWITCH ACTIVATED",
-        description: killSwitchActive ? "Trading operations resumed." : "All trading halted. Orders cancelled.",
+        description: killSwitchActive ? "Trading operations resumed." : "All trading halted. Paper orders cancelled on Alpaca.",
       });
-    } catch {
-      toast({ title: "Error", description: "Kill switch operation failed.", variant: "destructive" });
+    } catch (e) {
+      toast({
+        title: "Kill switch failed",
+        description: e instanceof Error ? e.message : "Request failed.",
+        variant: "destructive",
+      });
     }
   };
 
-  const handleStartStop = () => {
+  const handleStartStop = async () => {
     if (killSwitchActive) return;
-    setIsTrading(!isTrading);
-    toast({
-      title: isTrading ? "Trading Stopped" : "Trading Started",
-      description: isTrading ? "Autonomous trading loop paused." : `Autonomous trading loop running (${mode}).`,
-    });
+    try {
+      const next = isTrading ? "stop" : "start";
+      await apiRequest("POST", "/api/engine/control", { action: next });
+      await queryClient.invalidateQueries({ queryKey: ["/api/engine"] });
+      await queryClient.invalidateQueries({ queryKey: ["/api/system/status"] });
+      toast({
+        title: isTrading ? "Engine Stopped" : "Engine Started",
+        description: isTrading
+          ? "Autonomous loop stopped. Positions still at broker."
+          : "Syncing with Alpaca and Ollama on each cycle. Paper or live per Settings.",
+      });
+    } catch (e) {
+      toast({
+        title: "Engine error",
+        description: e instanceof Error ? e.message : "Request failed. Add API keys in Settings.",
+        variant: "destructive",
+      });
+    }
   };
 
   return (
     <aside className="w-[220px] h-screen flex flex-col bg-sidebar border-r border-sidebar-border shrink-0" data-testid="sidebar">
-      {/* Logo */}
       <div className="px-4 pt-5 pb-4">
         <div className="flex items-center gap-2.5">
           <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-label="Titan Trader Logo">
@@ -85,12 +97,11 @@ export default function AppSidebar() {
           </svg>
           <div>
             <h1 className="text-sm font-bold tracking-wide text-foreground">TITAN TRADER</h1>
-            <p className="text-[10px] text-muted-foreground tracking-widest uppercase">Autonomous AI</p>
+            <p className="text-[10px] text-muted-foreground tracking-widest uppercase">Local use only</p>
           </div>
         </div>
       </div>
 
-      {/* Mode Badge */}
       <div className="px-4 pb-3">
         <Badge
           variant="outline"
@@ -107,7 +118,6 @@ export default function AppSidebar() {
         </Badge>
       </div>
 
-      {/* Navigation */}
       <nav className="flex-1 px-2 space-y-0.5 overflow-y-auto">
         {navItems.map(({ path, label, icon: Icon }) => {
           const isActive = location === path || (path !== "/" && location.startsWith(path));
@@ -130,9 +140,7 @@ export default function AppSidebar() {
         })}
       </nav>
 
-      {/* Controls */}
       <div className="p-3 space-y-2 border-t border-sidebar-border">
-        {/* Start / Stop */}
         <Button
           size="sm"
           className={cn(
@@ -141,7 +149,7 @@ export default function AppSidebar() {
               ? "bg-vice-orange hover:bg-vice-orange/80 text-white"
               : "bg-primary hover:bg-primary/80 text-primary-foreground"
           )}
-          onClick={handleStartStop}
+          onClick={() => void handleStartStop()}
           disabled={killSwitchActive}
           data-testid="button-start-stop"
         >
@@ -149,7 +157,15 @@ export default function AppSidebar() {
           {isTrading ? "STOP" : "START"}
         </Button>
 
-        {/* Kill Switch */}
+        {engineLastError && (
+          <p
+            className="text-[10px] text-destructive leading-tight rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5"
+            title={engineLastError}
+          >
+            {engineLastError}
+          </p>
+        )}
+
         <AlertDialog>
           <AlertDialogTrigger asChild>
             <Button
@@ -174,13 +190,13 @@ export default function AppSidebar() {
               <AlertDialogDescription>
                 {killSwitchActive
                   ? "This will resume autonomous trading operations. Ensure all risk checks are passing before proceeding."
-                  : "This will immediately halt all trading, cancel pending orders, and prevent new trades. Use this for emergency situations only."}
+                  : "This will immediately halt all trading, cancel pending Alpaca orders, and stop the engine loop."}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction
-                onClick={handleKillSwitch}
+                onClick={() => void handleKillSwitch()}
                 className={cn(
                   killSwitchActive ? "bg-primary text-primary-foreground" : "bg-destructive text-destructive-foreground"
                 )}
@@ -192,16 +208,8 @@ export default function AppSidebar() {
         </AlertDialog>
       </div>
 
-      {/* Footer */}
       <div className="px-4 py-2 border-t border-sidebar-border">
-        <a
-          href="https://www.perplexity.ai/computer"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-        >
-          Created with Perplexity Computer
-        </a>
+        <p className="text-[10px] text-muted-foreground">Alpaca + Ollama � localhost</p>
       </div>
     </aside>
   );

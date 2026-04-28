@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ShieldAlert, AlertTriangle, OctagonX, ShieldCheck, Gauge, Lock, ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { RiskEvent, TradingConfig, PortfolioSnapshot } from "@shared/schema";
+import type { RiskEvent, TradingConfig, PortfolioSnapshot, Position, OptionsPosition } from "@shared/schema";
 
 function RiskMeter({
   label,
@@ -95,13 +95,24 @@ export default function Risk() {
     refetchInterval: 10000,
   });
 
+  const { data: positions = [] } = useQuery<Position[]>({
+    queryKey: ["/api/positions", mode],
+    refetchInterval: 10000,
+  });
+  const { data: optionsRows = [] } = useQuery<OptionsPosition[]>({
+    queryKey: ["/api/options", mode],
+    refetchInterval: 10000,
+  });
   const { data: snapshot } = useQuery<PortfolioSnapshot>({
     queryKey: ["/api/portfolio", mode],
     refetchInterval: 10000,
   });
 
   const drawdown = snapshot?.drawdown ?? 0;
-  const dailyLoss = Math.abs(snapshot?.dayPnl ?? 0) / (snapshot?.equity ?? 100000);
+  const eq = snapshot?.equity ?? 100000;
+  const dailyLoss = Math.abs(snapshot?.dayPnl ?? 0) / (eq || 1);
+  const exposure = eq > 0 ? positions.reduce((sum, p) => sum + (p.marketValue ?? 0), 0) / eq : 0;
+  const optionsAllocation = eq > 0 ? optionsRows.reduce((sum, o) => sum + (o.currentValue ?? 0), 0) / eq : 0;
 
   return (
     <div className="p-4 lg:p-6 space-y-4" data-testid="page-risk">
@@ -129,8 +140,8 @@ export default function Risk() {
         <CardContent className="space-y-4 pb-4">
           <RiskMeter label="Daily Loss" value={dailyLoss} max={config?.dailyLossLimit ?? 0.03} icon={ArrowDown} />
           <RiskMeter label="Drawdown" value={drawdown} max={config?.maxDrawdown ?? 0.15} icon={AlertTriangle} />
-          <RiskMeter label="Portfolio Exposure" value={0.58} max={config?.maxPortfolioExposure ?? 0.60} icon={ShieldAlert} />
-          <RiskMeter label="Options Allocation" value={0.22} max={config?.maxOptionsAllocation ?? 0.40} icon={Lock} />
+          <RiskMeter label="Portfolio Exposure" value={exposure} max={config?.maxPortfolioExposure ?? 0.60} icon={ShieldAlert} />
+          <RiskMeter label="Options Allocation" value={optionsAllocation} max={config?.maxOptionsAllocation ?? 0.40} icon={Lock} />
         </CardContent>
       </Card>
 

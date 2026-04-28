@@ -1,211 +1,71 @@
-Titan Trader — Autonomous AI Trading Agent
-A fully autonomous trading system combining statistically validated strategies with AI-powered sentiment analysis via Ollama. Includes equity and options trading (Wheel Strategy, Iron Condors), multi-layered risk management, and security-hardened architecture.
-Architecture Overview
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     ORCHESTRATOR (core loop)                     │
-│  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │  Market   │  │  Strategy  │  │  Ollama  │  │    Risk      │  │
-│  │  Data     │→ │  Ensemble  │→ │Sentiment │→ │  Management  │  │
-│  │  Pipeline │  │  Engine    │  │ Analysis │  │  Engine      │  │
-│  └──────────┘  └────────────┘  └──────────┘  └──────┬───────┘  │
-│                                                      │          │
-│  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────▼───────┐  │
-│  │ Options  │  │   Iron     │  │  Wheel   │  │  Execution   │  │
-│  │ Greeks   │← │  Condor    │← │ Strategy │← │  Engine      │  │
-│  │ Engine   │  │  Strategy  │  │          │  │  (Alpaca)    │  │
-│  └──────────┘  └────────────┘  └──────────┘  └──────────────┘  │
-│                                                                  │
-│  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Database │  │  Monitoring│  │  Audit   │  │  Encryption  │  │
-│  │ (SQLite) │  │  (Prom)   │  │  Logger  │  │  \& Secrets   │  │
-│  └──────────┘  └────────────┘  └──────────┘  └──────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-Strategies (Empirically Validated)
-Equity Strategies (Ensemble Voting)
-All strategies run in parallel and vote. Trades only execute when 60%+ strategies agree.
-Strategy	Basis	Sharpe Ratio	Description
-Bollinger Mean Reversion	CWMR research (NYU)	1.74	Buy oversold (RSI<30 + below lower BB), sell overbought
-Z-Score Mean Reversion	PAMR principles	1.63	Multi-timeframe statistical mean reversion
-EMA Crossover	FTRL principles	1.04	Dual EMA crossover with ADX trend filter
-MACD Momentum	Classic momentum	~0.8	MACD crossovers with histogram divergence
-The system uses the Hurst exponent to detect market regime (trending vs. mean-reverting) and weights strategies accordingly.
-Options Strategies
-Strategy	Annual Return	Win Rate	Description
-Wheel (CSP + CC)	12-25%	60-75%	Sell puts on quality stocks, sell calls if assigned
-Iron Condor	8-15%	86-98%	Market-neutral premium collection, close at 50% profit
-Risk Management (Multi-Layer)
-```
-Layer 1: Per-Trade Risk       → Max 2% of portfolio per trade
-Layer 2: Position Sizing      → Max 10% in any single position
-Layer 3: Portfolio Exposure    → Max 60% total exposure
-Layer 4: Options Allocation    → Max 40% in options
-Layer 5: Daily Loss Breaker   → Halt trading at 3% daily loss
-Layer 6: Weekly Loss Breaker  → Suspend trading at 7% weekly loss
-Layer 7: Max Drawdown Kill    → Full shutdown at 15% drawdown
-Layer 8: Emergency Kill Switch → Manual override, liquidates everything
-```
-Security Features
-Secrets Management: All credentials via environment variables, never hardcoded
-Encryption at Rest: Fernet encryption for local data via `SecureKeyManager`
-Audit Trail: HMAC-signed immutable audit log for all trading actions
-Log Sanitization: Automatic redaction of API keys, tokens, passwords in logs
-Rate Limiting: Token-bucket rate limiter prevents API abuse
-Docker Hardening: Non-root user, dropped capabilities, read-only filesystem, resource limits
-Network Isolation: Internal Docker network, only monitoring port exposed
-Input Validation: Pydantic models with hard safety limits (e.g., risk can't exceed 5%)
-Quick Start
-1. Prerequisites
-Python 3.12+
-Ollama running locally with a model loaded
-Alpaca account (free, paper trading)
-2. Setup
-```bash
-# Clone and enter directory
-cd titan-trader
+﻿# Titan Trader — local personal app
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\\Scripts\\activate  # Windows
+Offline-first dashboard for **your machine only** (defaults to `127.0.0.1`). SQLite data lives in `data/titan.db` unless you set `TITAN_DB_PATH`.
 
-# Install dependencies
-pip install -r requirements.txt
+## What is automated today
 
-# Configure
-cp .env.example .env
-# Edit .env with your Alpaca API keys
-```
-3. Get Alpaca API Keys
-Sign up at https://alpaca.markets
-Go to Paper Trading dashboard
-Generate API keys
-Add to your `.env` file
-4. Setup Ollama
-```bash
-# Pull a model (if not already done)
-ollama pull llama3.1:8b
+- **Equities:** the built-in engine syncs your Alpaca **account, stock positions, and portfolio**; scores an **ensemble** of four rules; uses **Ollama** sentiment; obeys **daily / weekly (7d) / max drawdown** risk limits; places **stock market orders** when allowed.
+- **Options:** **OCC** option **positions** are read from Alpaca, **Greeks/IV** are filled from the **options snapshot** API when available. **Multi-leg** opens use `submitMultilegOrder` (options account + entitlements required). **Wheel** and **iron condor** modules are **scaffolded** in `server/strategies/` (not a full separate auto-trader loop yet).
 
-# Verify it's running
-curl http://localhost:11434/api/tags
-```
-5. Run
-```bash
-# Health check first
-python main.py --health
+## Quick start
 
-# Run a single cycle to test
-python main.py --cycle
+1. **Node.js 20+**
+2. `npm install` — keep default install (includes dev tools). If `tsc` is missing, you probably ran install with `NODE_ENV=production`; run `npm install` again without that.
+3. Copy `.env.example` to `.env` and set **`TITAN_ENCRYPTION_KEY`** (64 hex characters) if you store API keys in Settings.
+4. **`npm run db:push`** — applies the database schema.
+5. **`npm run dev`** → open **http://127.0.0.1:5000** (or your `PORT`).
 
-# Start autonomous trading (paper mode)
-python main.py
+**Production-style run:** `npm run build` then `npm start` (serves built UI + API on the same port).
 
-# Check status
-python main.py --status
-```
-Docker Deployment
-```bash
-# Start everything (trading agent + Ollama)
-docker-compose up -d
+## Environment
 
-# Check health
-curl http://localhost:9090/health
+| Variable | Purpose |
+|----------|---------|
+| `TITAN_DB_PATH` | SQLite file path (default `data/titan.db`) |
+| `TITAN_ENCRYPTION_KEY` | 64 hex chars; required for stable encryption of saved keys |
+| `TITAN_ENGINE_URL` | Empty = embedded engine only. Set (e.g. `http://localhost:9090`) to proxy `/api/agent/*` health/metrics/status |
+| `HOST` | Default `127.0.0.1`. Use `0.0.0.0` only if you need LAN access |
+| `PORT` | Default `5000` |
+| `TITAN_CYCLE_SECONDS` | Seconds between engine cycles (default **90**) |
+| `TITAN_SEED_DEMO` | If `true`, startup loads **demo** portfolio/trades/strategies. Otherwise only **minimal default strategies** + optional empty config bootstrap |
+| `TITAN_ALLOW_SEED` | Must be `true` to allow **`POST /api/seed`** when `NODE_ENV=production` |
+| `TITAN_API_TOKEN` | If set, **`X-Titan-Token`** header must match on all **`/api`** routes (LAN hardening) |
+| `TITAN_PAPER_KEY` / `TITAN_PAPER_SECRET` | Optional env Alpaca paper keys for **`npm run backtest`** without using the Settings UI |
 
-# View logs
-docker-compose logs -f titan-trader
+## Legacy `data.db`
 
-# Stop
-docker-compose down
-```
-CLI Commands
-Command	Description
-`python main.py`	Start autonomous trading loop
-`python main.py --health`	Check system health (broker, Ollama, DB)
-`python main.py --status`	Full system status with portfolio details
-`python main.py --cycle`	Run one analysis cycle and exit
-`python main.py --kill-switch`	EMERGENCY: Halt all trading, cancel orders
-`python main.py --deactivate-kill`	Resume trading after kill switch
-`python main.py --live`	Enable live trading (requires confirmation)
-`python main.py --log-level DEBUG`	Verbose logging
-Monitoring
-The system exposes HTTP endpoints on port 9090:
-Endpoint	Description
-`GET /health`	System health check (200 = healthy, 503 = degraded)
-`GET /metrics`	Prometheus-compatible metrics
-`GET /status`	Full JSON system status
-Key Metrics
-`titan\_trades\_executed` — Total trades executed
-`titan\_portfolio\_equity` — Current portfolio value
-`titan\_portfolio\_drawdown` — Current drawdown from peak
-`titan\_kill\_switch\_active` — 1 if kill switch is engaged
-`titan\_cycle\_duration\_seconds` — Time per analysis cycle
-Project Structure
-```
-titan-trader/
-├── main.py                    # Entry point \& CLI
-├── config/
-│   └── settings.py            # Pydantic settings with validation
-├── core/
-│   ├── orchestrator.py        # Main trading loop
-│   └── database.py            # SQLite trade history \& state
-├── data/
-│   ├── market\_data.py         # Alpaca data pipeline with caching
-│   └── indicators.py          # Technical indicators (RSI, MACD, BB, etc.)
-├── strategies/
-│   ├── base.py                # Strategy interface \& signal types
-│   ├── mean\_reversion.py      # Bollinger \& Z-Score mean reversion
-│   ├── trend\_following.py     # EMA crossover \& MACD momentum
-│   └── ensemble.py            # Weighted voting ensemble
-├── options/
-│   ├── greeks.py              # Black-Scholes Greeks calculator
-│   ├── wheel.py               # Wheel strategy (CSP + CC)
-│   └── iron\_condor.py         # Iron condor strategy
-├── ollama/
-│   ├── sentiment.py           # Ollama sentiment analysis
-│   └── news\_fetcher.py        # Financial news from SEC, Alpaca, etc.
-├── execution/
-│   └── broker.py              # Alpaca order execution engine
-├── risk/
-│   └── manager.py             # Multi-layer risk management
-├── monitoring/
-│   └── health.py              # Prometheus metrics \& health checks
-├── utils/
-│   ├── security.py            # Encryption, audit, rate limiting
-│   └── logging\_config.py      # Structured logging
-├── docker/
-│   └── Dockerfile             # Multi-stage secure Docker build
-├── docker-compose.yml         # Full stack deployment
-├── requirements.txt           # Python dependencies
-├── .env.example               # Configuration template
-└── .gitignore                 # Security-aware gitignore
-```
-How the Ensemble Works
-```
-Market Data → \[Indicators] → \[Strategy 1: Bollinger MR] → STRONG\_BUY (0.85)
-                             → \[Strategy 2: Z-Score MR]  → BUY (0.72)
-                             → \[Strategy 3: EMA Cross]   → HOLD (0.30)
-                             → \[Strategy 4: MACD Mom]    → BUY (0.65)
-                             ↓
-                      \[Weighted Voting]
-                      Score: +0.58 → BUY
-                      Agreement: 75% (3/4 bullish)
-                      Confidence: 0.72
-                             ↓
-                      \[Ollama Sentiment] → NEUTRAL (no veto)
-                             ↓
-                      \[Risk Manager] → APPROVED (risk score: 0.35)
-                             ↓
-                      \[Position Sizing] → 45 shares ($4,500)
-                             ↓
-                      \[Alpaca Execution] → Limit order submitted
-```
-Safety Notes
-ALWAYS start with paper trading. Run for weeks before considering live.
-The kill switch (`--kill-switch`) is your emergency brake. It cancels all orders and halts trading.
-Live mode requires typing "CONFIRM LIVE TRADING" — this is intentional friction.
-Risk limits have hard caps in the code (e.g., max risk per trade cannot exceed 5% even if configured higher).
-The system logs every trade decision and risk check to an HMAC-signed audit trail.
-Monitor the system via the health endpoint — set up alerts for non-200 responses.
-Disclaimer
-This software is for educational and research purposes. Trading involves substantial risk of loss. Past performance of any strategy does not guarantee future results. Always paper trade first and never risk money you cannot afford to lose.
+If you already have a database in the project root named `data.db`, set `TITAN_DB_PATH=data.db` and run `npm run db:push`.
+
+## One-command install
+
+`npm run install:titan` (or `node scripts/install.mjs`) will: ensure `data/` exists, run `npm install` with **devDependencies** even if `NODE_ENV=production` is set in your shell, try `npm rebuild better-sqlite3`, create `.env` from `.env.example` if missing, fill **TITAN_ENCRYPTION_KEY** if empty or invalid, and run `npm run db:push`.
+
+For a **fully clean** npm tree first, delete `node_modules` (and optionally `package-lock.json`), then run `npm run install:titan`.
+
+## Built-in engine (Alpaca + Ollama)
+
+1. In **Settings**, add **paper** (or live) **Alpaca** API keys.
+2. Run **Ollama** with a model (e.g. `ollama pull llama3.2` and `ollama serve`).
+3. Set **Watchlist and Ollama** in Settings and save.
+4. Click **START** in the sidebar. Each cycle:
+   - Sync **account, positions, portfolio** from Alpaca into SQLite
+   - Pull **15-minute IEX bars** for a rotating watchlist symbol
+   - Update **strategy signals** (ensemble rules + Ollama sentiment)
+   - Enforce **daily loss**, **weekly rolling equity drop**, **max drawdown**, exposure, kill switch
+   - Place **equity market orders** only when ensemble + risk gates pass
+   - Refresh **strategy table metrics** from **executed** equity trades (rolling proxy stats)
+   - Sync **option legs** + snapshot **Greeks** when OCC symbols are present
+
+**KILL SWITCH** cancels open Alpaca orders and stops the engine. **STOP** stops the loop without resolving the kill switch.
+
+## Offline backtest (bars replay)
+
+`npm run backtest [SYMBOL]` replays Alpaca history and prints recent signal labels (uses paper keys from env or Settings). Extend as needed for reports under `data/`.
+
+## External engine (optional)
+
+If you set **`TITAN_ENGINE_URL`**, `/api/agent/*` proxies that service. Leave it empty to use the embedded Node engine only.
+
+## UI
+
+Minimal surface: **Dashboard** (ensemble toggles + options note), **Risk**, **Trade log**, **Settings**. Optional demo seed only when **`TITAN_SEED_DEMO=true`**.

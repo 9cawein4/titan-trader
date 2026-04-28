@@ -3,8 +3,10 @@ import { getAgentHealth, getAgentMetrics, getAgentStatus } from "./agent";
 import type { Express, Request, Response, NextFunction } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { registerEngineRoutes, onKillSwitchActivate } from "./engine-api";
 import { z } from "zod";
-import crypto from "crypto";
+import { encryptSecret as encrypt, hmacSignPayload as hmacSign } from "./secrets";
+import { log } from "./log";
 import {
   insertTradingConfigSchema,
   tradingModeSchema,
@@ -20,38 +22,6 @@ import {
   insertAuditLogSchema,
   insertSystemStatusSchema,
 } from "@shared/schema";
-
-// ─── Security: Simple encryption for API keys at rest ───
-const ENCRYPTION_KEY = process.env.TITAN_ENCRYPTION_KEY || crypto.randomBytes(32).toString("hex");
-const IV_LENGTH = 16;
-
-function encrypt(text: string): string {
-  const iv = crypto.randomBytes(IV_LENGTH);
-  const key = Buffer.from(ENCRYPTION_KEY.slice(0, 64), "hex");
-  const cipher = crypto.createCipheriv("aes-256-cbc", key, iv);
-  let encrypted = cipher.update(text, "utf8", "hex");
-  encrypted += cipher.final("hex");
-  return iv.toString("hex") + ":" + encrypted;
-}
-
-function decrypt(text: string): string {
-  try {
-    const parts = text.split(":");
-    const iv = Buffer.from(parts[0], "hex");
-    const key = Buffer.from(ENCRYPTION_KEY.slice(0, 64), "hex");
-    const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-    let decrypted = decipher.update(parts[1], "hex", "utf8");
-    decrypted += decipher.final("utf8");
-    return decrypted;
-  } catch {
-    return "[encrypted]";
-  }
-}
-
-// ─── Security: HMAC signing for audit trail ───
-function hmacSign(data: string): string {
-  return crypto.createHmac("sha256", ENCRYPTION_KEY.slice(0, 32)).update(data).digest("hex");
-}
 
 // ─── Security: Rate limiter ───
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
@@ -259,6 +229,14 @@ export async function registerRoutes(
         resolved: action === "deactivate" ? 1 : 0,
       });
 
+      if (action === "activate") {
+        try {
+          await onKillSwitchActivate();
+        } catch (e) {
+          log(`Kill switch broker/engine step: ${e instanceof Error ? e.message : String(e)}`, "express");
+        }
+      }
+
       await logAudit("kill_switch", `Kill switch ${action}d`, req);
       res.json({ success: true, action, event });
     } catch (e) {
@@ -403,6 +381,10 @@ export async function registerRoutes(
 
   app.post("/api/seed", async (req, res) => {
     try {
+      const allow = process.env.NODE_ENV !== "production" || process.env.TITAN_ALLOW_SEED === "true";
+      if (!allow) {
+        return res.status(403).json({ error: "Seeding disabled in production (set TITAN_ALLOW_SEED=true)" });
+      }
       await seedDemoData();
       await logAudit("seed_data", "Demo data seeded", req);
       res.json({ success: true });
@@ -411,12 +393,35 @@ export async function registerRoutes(
     }
   });
 
-  // Auto-seed on first load
-  const config = await storage.getTradingConfig();
-  if (!config) {
-    await seedDemoData();
+  // Bootstrap defaults; full demo portfolio only if TITAN_SEED_DEMO=true
+  try {
+    let config = await storage.getTradingConfig();
+    if (!config) {
+      await storage.upsertTradingConfig({
+        tradingMode: "paper",
+        ollamaUrl: "http://localhost:11434",
+        ollamaModel: "deepseek-r1:latest",
+        watchlist: "AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,SPY,QQQ,IWM",
+        maxRiskPerTrade: 0.02,
+        maxPortfolioExposure: 0.6,
+        maxOptionsAllocation: 0.4,
+        dailyLossLimit: 0.03,
+        weeklyLossLimit: 0.07,
+        maxDrawdown: 0.15,
+        ensembleThreshold: 0.6,
+      });
+      config = await storage.getTradingConfig();
+    }
+    if (process.env.TITAN_SEED_DEMO === "true") {
+      await seedDemoData();
+    } else {
+      await ensureRuntimeDefaults();
+    }
+  } catch (e) {
+    log(`Startup bootstrap skipped: ${e instanceof Error ? e.message : String(e)}`, "express");
   }
 
+  registerEngineRoutes(app, logAudit);
 
   // ═══════════════════════════════════════════════
   // AGENT PROXY (Python engine)
@@ -446,6 +451,18 @@ export async function registerRoutes(
   });
 
   return httpServer;
+}
+
+async function ensureRuntimeDefaults() {
+  const rows = await storage.getStrategies();
+  if (rows.length > 0) return;
+  const minimal = [
+    { name: "Bollinger Mean Reversion", type: "mean_reversion", weight: 0.3, sharpeRatio: null, winRate: null, totalTrades: 0, profitFactor: null, enabled: 1, lastSignal: "HOLD", lastSignalTime: new Date().toISOString(), confidence: 0 },
+    { name: "Z-Score Mean Reversion", type: "mean_reversion", weight: 0.25, sharpeRatio: null, winRate: null, totalTrades: 0, profitFactor: null, enabled: 1, lastSignal: "HOLD", lastSignalTime: new Date().toISOString(), confidence: 0 },
+    { name: "EMA Crossover", type: "trend_following", weight: 0.25, sharpeRatio: null, winRate: null, totalTrades: 0, profitFactor: null, enabled: 1, lastSignal: "HOLD", lastSignalTime: new Date().toISOString(), confidence: 0 },
+    { name: "MACD Momentum", type: "trend_following", weight: 0.2, sharpeRatio: null, winRate: null, totalTrades: 0, profitFactor: null, enabled: 1, lastSignal: "HOLD", lastSignalTime: new Date().toISOString(), confidence: 0 },
+  ];
+  for (const s of minimal) await storage.upsertStrategy(s);
 }
 
 // ─── Demo Data Seeder ───

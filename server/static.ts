@@ -3,6 +3,13 @@ import fs from "fs";
 import path from "path";
 
 export function serveStatic(app: Express) {
+  app.use((_req, res, next) => {
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: http://127.0.0.1:* http://localhost:*; font-src 'self'",
+    );
+    next();
+  });
   const distPath = path.resolve(__dirname, "public");
   if (!fs.existsSync(distPath)) {
     throw new Error(

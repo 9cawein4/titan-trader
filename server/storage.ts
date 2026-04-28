@@ -1,5 +1,4 @@
 import {
-  type User, type InsertUser, users,
   type TradingConfig, type InsertTradingConfig, tradingConfig,
   type PortfolioSnapshot, type InsertPortfolioSnapshot, portfolioSnapshots,
   type Position, type InsertPosition, positions,
@@ -15,7 +14,8 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { eq, desc, and, gte, lte } from "drizzle-orm";
 
-const sqlite = new Database(process.env.TITAN_DB_PATH || "data.db");
+import { resolveDbPath } from "./paths";
+const sqlite = new Database(resolveDbPath());
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
 sqlite.pragma("synchronous = NORMAL");
@@ -23,11 +23,6 @@ sqlite.pragma("synchronous = NORMAL");
 export const db = drizzle(sqlite);
 
 export interface IStorage {
-  // Users
-  getUser(id: number): Promise<User | undefined>;
-  getUserByUsername(username: string): Promise<User | undefined>;
-  createUser(user: InsertUser): Promise<User>;
-
   // Trading Config
   getTradingConfig(): Promise<TradingConfig | undefined>;
   upsertTradingConfig(config: InsertTradingConfig): Promise<TradingConfig>;
@@ -50,11 +45,13 @@ export interface IStorage {
   // Strategies
   getStrategies(): Promise<Strategy[]>;
   upsertStrategy(strategy: InsertStrategy): Promise<Strategy>;
+  updateStrategy(id: number, patch: Partial<InsertStrategy>): Promise<Strategy | undefined>;
 
   // Options
   getOptionsPositions(mode: string): Promise<OptionsPosition[]>;
   createOptionsPosition(pos: InsertOptionsPosition): Promise<OptionsPosition>;
   updateOptionsPosition(id: number, data: Partial<InsertOptionsPosition>): Promise<void>;
+  clearOptionsPositions(mode: string): Promise<void>;
 
   // Risk
   getRiskEvents(limit?: number): Promise<RiskEvent[]>;
@@ -76,17 +73,6 @@ export interface IStorage {
 }
 
 export class DatabaseStorage implements IStorage {
-  // ─── Users ───
-  async getUser(id: number): Promise<User | undefined> {
-    return db.select().from(users).where(eq(users.id, id)).get();
-  }
-  async getUserByUsername(username: string): Promise<User | undefined> {
-    return db.select().from(users).where(eq(users.username, username)).get();
-  }
-  async createUser(insertUser: InsertUser): Promise<User> {
-    return db.insert(users).values(insertUser).returning().get();
-  }
-
   // ─── Trading Config ───
   async getTradingConfig(): Promise<TradingConfig | undefined> {
     return db.select().from(tradingConfig).get();
@@ -155,6 +141,11 @@ export class DatabaseStorage implements IStorage {
     return db.insert(strategies).values(strategy).returning().get();
   }
 
+  async updateStrategy(id: number, patch: Partial<InsertStrategy>): Promise<Strategy | undefined> {
+    db.update(strategies).set(patch).where(eq(strategies.id, id)).run();
+    return db.select().from(strategies).where(eq(strategies.id, id)).get();
+  }
+
   // ─── Options ───
   async getOptionsPositions(mode: string): Promise<OptionsPosition[]> {
     return db.select().from(optionsPositions)
@@ -165,6 +156,10 @@ export class DatabaseStorage implements IStorage {
   }
   async updateOptionsPosition(id: number, data: Partial<InsertOptionsPosition>): Promise<void> {
     db.update(optionsPositions).set(data).where(eq(optionsPositions.id, id)).run();
+  }
+
+  async clearOptionsPositions(mode: string): Promise<void> {
+    db.delete(optionsPositions).where(eq(optionsPositions.tradingMode, mode)).run();
   }
 
   // ─── Risk ───
@@ -218,3 +213,4 @@ export class DatabaseStorage implements IStorage {
 }
 
 export const storage = new DatabaseStorage();
+

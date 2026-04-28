@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTradingMode } from "@/lib/tradingContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -109,6 +110,29 @@ export default function Settings() {
 
   const { data: config } = useQuery<TradingConfig>({
     queryKey: ["/api/config"],
+  });
+
+  const [wl, setWl] = useState("");
+  const [ollamaUrl, setOllamaUrl] = useState("");
+  const [ollamaModel, setOllamaModel] = useState("");
+
+  useEffect(() => {
+    if (config) {
+      setWl(config.watchlist ?? "");
+      setOllamaUrl(config.ollamaUrl ?? "http://localhost:11434");
+      setOllamaModel(config.ollamaModel ?? "llama3.2");
+    }
+  }, [config]);
+
+  const configExtraMutation = useMutation({
+    mutationFn: async (body: { watchlist: string; ollamaUrl: string; ollamaModel: string }) => {
+      await apiRequest("PATCH", "/api/config", body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/config"] });
+      toast({ title: "Saved", description: "Watchlist and Ollama updated." });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
   });
 
   const { data: statuses = [] } = useQuery<SystemStatus[]>({
@@ -224,8 +248,8 @@ export default function Settings() {
               )}
               <p className="text-xs">
                 {mode === "paper"
-                  ? "Paper trading mode — no real money at risk. Practice freely."
-                  : "LIVE TRADING — Real money is at risk. Monitor closely."}
+                  ? "Paper trading mode â€” no real money at risk. Practice freely."
+                  : "LIVE TRADING â€” Real money is at risk. Monitor closely."}
               </p>
             </div>
           </div>
@@ -279,7 +303,7 @@ export default function Settings() {
                   type="password"
                   value={paperSecret}
                   onChange={(e) => setPaperSecret(e.target.value)}
-                  placeholder="••••••••••••••••••••"
+                  placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
                   className="bg-muted border-border text-xs font-mono h-8 mt-1"
                   data-testid="input-paper-secret"
                 />
@@ -331,7 +355,7 @@ export default function Settings() {
                   type="password"
                   value={liveSecret}
                   onChange={(e) => setLiveSecret(e.target.value)}
-                  placeholder="••••••••••••••••••••"
+                  placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
                   className="bg-muted border-border text-xs font-mono h-8 mt-1"
                   data-testid="input-live-secret"
                 />
@@ -366,15 +390,15 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* Watchlist */}
+      {/* Watchlist + Ollama */}
       <Card className="bg-card border-card-border" data-testid="card-watchlist">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold flex items-center gap-2">
             <SettingsIcon className="w-4 h-4 text-vice-purple" />
-            Watchlist
+            Watchlist and Ollama
           </CardTitle>
         </CardHeader>
-        <CardContent className="pb-4">
+        <CardContent className="space-y-4 pb-4">
           <div className="flex flex-wrap gap-1.5">
             {(config?.watchlist ?? "").split(",").filter(Boolean).map((sym) => (
               <Badge key={sym} variant="outline" className="text-xs border-primary/30 text-primary bg-primary/5 py-1 px-2.5">
@@ -382,6 +406,41 @@ export default function Settings() {
               </Badge>
             ))}
           </div>
+          <div className="space-y-2">
+            <Label className="text-[10px] uppercase text-muted-foreground">Symbols (comma-separated)</Label>
+            <Textarea
+              value={wl}
+              onChange={(e) => setWl(e.target.value)}
+              className="bg-muted border-border text-xs font-mono min-h-[72px]"
+              placeholder="AAPL,MSFT,..."
+            />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <Label className="text-[10px] uppercase text-muted-foreground">Ollama URL</Label>
+              <Input value={ollamaUrl} onChange={(e) => setOllamaUrl(e.target.value)} className="bg-muted border-border text-xs mt-1" />
+            </div>
+            <div>
+              <Label className="text-[10px] uppercase text-muted-foreground">Model name</Label>
+              <Input value={ollamaModel} onChange={(e) => setOllamaModel(e.target.value)} className="bg-muted border-border text-xs mt-1" />
+            </div>
+          </div>
+          <Button
+            size="sm"
+            disabled={configExtraMutation.isPending}
+            onClick={() =>
+              configExtraMutation.mutate({
+                watchlist: wl.replace(/[<>"']/g, "").slice(0, 2000),
+                ollamaUrl: ollamaUrl.trim().slice(0, 256),
+                ollamaModel: ollamaModel.trim().slice(0, 128),
+              })
+            }
+          >
+            Save watchlist and Ollama
+          </Button>
+          <p className="text-[10px] text-muted-foreground">
+            The engine pulls 15m bars and asks Ollama for sentiment each cycle (rotating symbols).
+          </p>
         </CardContent>
       </Card>
     </div>

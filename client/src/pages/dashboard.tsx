@@ -24,6 +24,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import type { PortfolioSnapshot, Position, SentimentEntry, Strategy } from "@shared/schema";
+import { StrategiesOnDashboard, OptionsAutomationHint } from "@/components/StrategyDashboardPanels";
 
 function KpiCard({
   title,

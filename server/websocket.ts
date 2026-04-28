@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
-import { log } from "./index";
+import { log } from "./log";
 
 // ─── Typed event system for real-time client updates ───
 export type WsEventType =
@@ -42,7 +42,11 @@ export function setupWebSocket(server: Server): WebSocketServer {
   const interval = setInterval(() => {
     wss?.clients.forEach((client) => {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "heartbeat", timestamp: new Date().toISOString() }));
+        try {
+          client.send(JSON.stringify({ type: "heartbeat", timestamp: new Date().toISOString() }));
+        } catch (e) {
+          log(`WS heartbeat send failed: ${e instanceof Error ? e.message : String(e)}`, "ws");
+        }
       }
     });
   }, 30000);
@@ -59,7 +63,11 @@ export function broadcast(event: WsEvent): void {
   const payload = JSON.stringify(event);
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+      try {
+        client.send(payload);
+      } catch (e) {
+        log(`WS broadcast send failed: ${e instanceof Error ? e.message : String(e)}`, "ws");
+      }
     }
   });
 }

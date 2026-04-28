@@ -1,4 +1,4 @@
-import { build as esbuild } from "esbuild";
+﻿import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
 import { rm, readFile } from "fs/promises";
 
@@ -13,15 +13,11 @@ const allowlist = [
   "drizzle-zod",
   "express",
   "express-rate-limit",
-  "express-session",
   "jsonwebtoken",
-  "memorystore",
   "multer",
   "nanoid",
   "nodemailer",
   "openai",
-  "passport",
-  "passport-local",
   "stripe",
   "uuid",
   "ws",
@@ -63,3 +59,4 @@ buildAll().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+

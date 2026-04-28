@@ -1,17 +1,28 @@
+import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 import { startHealthPolling } from "./agent";
+import { log } from "./log";
+import { apiErrorHandler } from "./apiErrorHandler";
+import { attachOptionalApiTokenAuth } from "./apiAuth";
+
+process.on("unhandledRejection", (reason: unknown) => {
+  console.error("[titan-trader] Unhandled rejection:", reason);
+});
+
+process.on("uncaughtException", (err: Error) => {
+  console.error("[titan-trader] Uncaught exception:", err);
+  process.exit(1);
+});
 
 const app = express();
 const httpServer = createServer(app);
 
-// Initialize WebSocket server on the same HTTP server
 setupWebSocket(httpServer);
 
-// Start polling the Python engine for health status
 startHealthPolling();
 
 declare module "http" {
@@ -29,33 +40,37 @@ app.use(
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  const o = err as { type?: string };
+  if (err instanceof SyntaxError || o.type === "entity.parse.failed") {
+    return res.status(400).json({
+      error: "Invalid JSON in request body",
+      message: "Invalid JSON in request body",
+    });
+  }
+  next(err);
+});
 
-export function log(message: string, source = "express") {
-  const formattedTime = new Date().toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
-  console.log(`${formattedTime} [${source}] ${message}`);
-}
+app.use(express.urlencoded({ extended: false }));
 
 app.use((req, res, next) => {
   const start = Date.now();
-  const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
+  const reqPath = req.path;
+  let capturedJsonResponse: Record<string, unknown> | undefined = undefined;
 
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
+  const originalResJson = res.json.bind(res);
+  res.json = function (bodyJson: unknown, ...args: unknown[]) {
+    capturedJsonResponse = bodyJson as Record<string, unknown>;
+    return (originalResJson as (body: unknown, ...a: unknown[]) => Response)(
+      bodyJson,
+      ...(args as []),
+    );
   };
 
   res.on("finish", () => {
     const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
+    if (reqPath.startsWith("/api")) {
+      let logLine = `${req.method} ${reqPath} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
@@ -67,39 +82,42 @@ app.use((req, res, next) => {
 });
 
 (async () => {
-  // Validate required env vars
   if (!process.env.TITAN_ENCRYPTION_KEY) {
-    console.warn("WARNING: TITAN_ENCRYPTION_KEY not set. API key encryption will use a random key that changes on restart.");
+    console.warn(
+      "WARNING: TITAN_ENCRYPTION_KEY not set. Encrypted settings will not survive restarts — generate one for local use.",
+    );
   }
 
+  attachOptionalApiTokenAuth(app);
   await registerRoutes(httpServer, app);
-
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-    console.error("Internal Server Error:", err);
-    if (res.headersSent) {
-      return next(err);
-    }
-    return res.status(status).json({ message });
-  });
 
   if (process.env.NODE_ENV === "production") {
     serveStatic(app);
   } else {
-    const { setupVite } = await import("./vite");
-    await setupVite(httpServer, app);
+    try {
+      const { setupVite } = await import("./vite");
+      await setupVite(httpServer, app);
+    } catch (e) {
+      console.error("[titan-trader] Vite middleware failed:", e);
+      process.exit(1);
+    }
   }
 
+  app.use(apiErrorHandler);
+
   const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
+  const host = process.env.HOST || "127.0.0.1";
+
+  httpServer.once("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[titan-trader] Port ${port} is already in use. Stop the other process or set PORT in .env.`);
+    } else {
+      console.error("[titan-trader] HTTP server error:", err.message);
+    }
+    process.exit(1);
+  });
+
+  httpServer.listen(port, host, () => {
+    log(`local app → http://${host}:${port}`, "express");
+  });
 })();
