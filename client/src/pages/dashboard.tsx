@@ -27,6 +27,7 @@ import {
 } from "recharts";
 import type { PortfolioSnapshot, Position, SentimentEntry, Strategy } from "@shared/schema";
 import { StrategiesOnDashboard, OptionsAutomationHint } from "@/components/StrategyDashboardPanels";
+import { TaxSummaryCard } from "@/components/TaxSummaryCard";
 
 function KpiCard({
   title,
@@ -365,6 +366,8 @@ export default function Dashboard() {
           variant={drawdown > 0.10 ? "danger" : drawdown > 0.05 ? "warning" : "default"}
         />
       </div>
+
+      <TaxSummaryCard mode={mode} />
 
       {/* Chart + Signals Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">

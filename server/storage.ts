@@ -13,7 +13,7 @@ import {
 } from "@shared/schema";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
-import { eq, desc, and, gte, lte } from "drizzle-orm";
+import { eq, desc, asc, and, gte, lte } from "drizzle-orm";
 
 import { resolveDbPath } from "./paths";
 const sqlite = new Database(resolveDbPath());
@@ -39,7 +39,27 @@ function ensureDecisionLogsTable(): void {
     );
   `);
 }
-ensureDecisionLogsTable();
+function ensureTradingConfigTaxColumns(): void {
+  const cols = sqlite.prepare("PRAGMA table_info(trading_config)").all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("tax_federal_marginal_rate")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN tax_federal_marginal_rate REAL DEFAULT 0.22;");
+  }
+  if (!names.has("tax_state_rate")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN tax_state_rate REAL DEFAULT 0.05;");
+  }
+  if (!names.has("tax_long_term_fed_rate")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN tax_long_term_fed_rate REAL DEFAULT 0.15;");
+  }
+  if (!names.has("tax_state_long_term_rate")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN tax_state_long_term_rate REAL;");
+    sqlite.exec("UPDATE trading_config SET tax_state_long_term_rate = tax_state_rate WHERE tax_state_long_term_rate IS NULL;");
+  }
+  if (!names.has("tax_residency_state")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN tax_residency_state TEXT DEFAULT '';");
+  }
+}
+ensureTradingConfigTaxColumns();
 
 export const db = drizzle(sqlite);
 
@@ -61,6 +81,7 @@ export interface IStorage {
 
   // Trades
   getTrades(mode: string, limit?: number, status?: string): Promise<Trade[]>;
+  getAllTradesForMode(mode: string): Promise<Trade[]>;
   createTrade(trade: InsertTrade): Promise<Trade>;
 
   // Strategies
@@ -152,6 +173,14 @@ export class DatabaseStorage implements IStorage {
     return db.select().from(trades)
       .where(eq(trades.tradingMode, mode))
       .orderBy(desc(trades.timestamp)).limit(limit).all();
+  }
+  async getAllTradesForMode(mode: string): Promise<Trade[]> {
+    return db
+      .select()
+      .from(trades)
+      .where(eq(trades.tradingMode, mode))
+      .orderBy(asc(trades.timestamp))
+      .all();
   }
   async createTrade(trade: InsertTrade): Promise<Trade> {
     return db.insert(trades).values(trade).returning().get();

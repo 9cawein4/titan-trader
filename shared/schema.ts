@@ -20,6 +20,11 @@ export const tradingConfig = sqliteTable("trading_config", {
   weeklyLossLimit: real("weekly_loss_limit").default(0.07),
   maxDrawdown: real("max_drawdown").default(0.15),
   ensembleThreshold: real("ensemble_threshold").default(0.60),
+  taxFederalMarginalRate: real("tax_federal_marginal_rate").default(0.22),
+  taxStateRate: real("tax_state_rate").default(0.05),
+  taxStateLongTermRate: real("tax_state_long_term_rate"),
+  taxLongTermFedRate: real("tax_long_term_fed_rate").default(0.15),
+  taxResidencyState: text("tax_residency_state").default(""),
 });
 
 export const insertTradingConfigSchema = createInsertSchema(tradingConfig).omit({ id: true }).extend({
@@ -31,6 +36,11 @@ export const insertTradingConfigSchema = createInsertSchema(tradingConfig).omit(
   weeklyLossLimit: z.number().min(0.01).max(0.10),
   maxDrawdown: z.number().min(0.05).max(0.20),
   ensembleThreshold: z.number().min(0.5).max(1.0),
+  taxFederalMarginalRate: z.number().min(0).max(0.37),
+  taxStateRate: z.number().min(0).max(0.15),
+  taxStateLongTermRate: z.number().min(0).max(0.15).optional(),
+  taxLongTermFedRate: z.number().min(0).max(0.24),
+  taxResidencyState: z.union([z.literal(""), z.string().length(2)]).optional(),
 });
 export type InsertTradingConfig = z.infer<typeof insertTradingConfigSchema>;
 export type TradingConfig = typeof tradingConfig.$inferSelect;

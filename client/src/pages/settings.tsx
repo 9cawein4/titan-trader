@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useTradingMode } from "@/lib/tradingContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,11 +38,14 @@ import {
   Database,
   Server,
   Radio,
+  Landmark,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import type { TradingConfig, SystemStatus } from "@shared/schema";
+import { STATE_RESIDENCY_LIST, getResidencyStateInfo } from "@shared/stateTax";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 function SystemStatusCard({ statuses }: { statuses: SystemStatus[] }) {
   const statusIcon: Record<string, any> = {
@@ -115,12 +118,24 @@ export default function Settings() {
   const [wl, setWl] = useState("");
   const [ollamaUrl, setOllamaUrl] = useState("");
   const [ollamaModel, setOllamaModel] = useState("");
+  const [taxFedPct, setTaxFedPct] = useState(22);
+  const [taxStatePct, setTaxStatePct] = useState(5);
+  const [taxStateLtPct, setTaxStateLtPct] = useState(5);
+  const [taxLtPct, setTaxLtPct] = useState(15);
+  const [taxStateCode, setTaxStateCode] = useState("");
 
   useEffect(() => {
     if (config) {
       setWl(config.watchlist ?? "");
       setOllamaUrl(config.ollamaUrl ?? "http://localhost:11434");
       setOllamaModel(config.ollamaModel ?? "llama3.2");
+      setTaxFedPct(Math.round((config.taxFederalMarginalRate ?? 0.22) * 100));
+      setTaxStatePct(Math.round((config.taxStateRate ?? 0.05) * 100));
+      setTaxStateLtPct(
+        Math.round(((config.taxStateLongTermRate ?? config.taxStateRate) ?? 0.05) * 100),
+      );
+      setTaxLtPct(Math.round((config.taxLongTermFedRate ?? 0.15) * 100));
+      setTaxStateCode((config.taxResidencyState ?? "").trim().toUpperCase());
     }
   }, [config]);
 
@@ -134,6 +149,30 @@ export default function Settings() {
     },
     onError: () => toast({ title: "Save failed", variant: "destructive" }),
   });
+
+  const taxRatesMutation = useMutation({
+    mutationFn: async (body: {
+      taxFederalMarginalRate: number;
+      taxStateRate: number;
+      taxStateLongTermRate: number;
+      taxLongTermFedRate: number;
+      taxResidencyState: string;
+    }) => {
+      await apiRequest("PATCH", "/api/config", body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/config"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/tax/summary"] });
+      toast({ title: "Saved", description: "Tax rate assumptions updated." });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
+  });
+
+  const sortedStates = useMemo(
+    () => [...STATE_RESIDENCY_LIST].sort((a, b) => a.name.localeCompare(b.name)),
+    [],
+  );
+  const residencyHint = taxStateCode ? getResidencyStateInfo(taxStateCode)?.basis : null;
 
   const { data: statuses = [] } = useQuery<SystemStatus[]>({
     queryKey: ["/api/system/status"],
@@ -387,6 +426,117 @@ export default function Settings() {
               </ul>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+
+      {/* Tax rate assumptions — residency + federal/state ST/LT */}
+      <Card className="bg-card border-card-border" data-testid="card-tax-rates">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Landmark className="w-4 h-4 text-primary" />
+            Tax reporting assumptions
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4 pb-4">
+          <p className="text-[10px] text-muted-foreground leading-relaxed">
+            Set your state of residency so state estimates follow typical treatment (ordinary vs long-term). Rates are planning defaults—replace
+            with your marginal brackets from last year&apos;s return or your CPA. Dashboard uses FIFO on logged equity trades only.
+          </p>
+          <div className="space-y-1.5">
+            <Label className="text-[10px] uppercase text-muted-foreground">State of residency</Label>
+            <Select
+              value={taxStateCode || "__NONE__"}
+              onValueChange={(v) => {
+                const code = v === "__NONE__" ? "" : v;
+                setTaxStateCode(code);
+                const info = getResidencyStateInfo(code);
+                if (info) {
+                  setTaxStatePct(Math.round(info.defaultShortTermRate * 100));
+                  setTaxStateLtPct(Math.round(info.defaultLongTermRate * 100));
+                }
+              }}
+            >
+              <SelectTrigger className="h-9 text-xs bg-muted border-border">
+                <SelectValue placeholder="Select state" />
+              </SelectTrigger>
+              <SelectContent className="max-h-[min(280px,50vh)]">
+                <SelectItem value="__NONE__" className="text-xs">
+                  Not set
+                </SelectItem>
+                {sortedStates.map((st) => (
+                  <SelectItem key={st.code} value={st.code} className="text-xs">
+                    {st.name} ({st.code})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {residencyHint && (
+              <p className="text-[10px] text-muted-foreground leading-snug border border-border/40 rounded-md p-2 bg-muted/15">
+                {residencyHint}
+              </p>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="text-xs"
+              disabled={!taxStateCode}
+              onClick={() => {
+                const info = getResidencyStateInfo(taxStateCode);
+                if (!info) return;
+                setTaxStatePct(Math.round(info.defaultShortTermRate * 100));
+                setTaxStateLtPct(Math.round(info.defaultLongTermRate * 100));
+              }}
+            >
+              Reset state rates from table
+            </Button>
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs">
+              <Label>Federal marginal (short-term)</Label>
+              <span className="font-mono text-muted-foreground">{taxFedPct}%</span>
+            </div>
+            <Slider value={[taxFedPct]} min={0} max={37} step={1} onValueChange={(v) => setTaxFedPct(v[0])} className="py-1" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs">
+              <Label>Federal long-term capital gains</Label>
+              <span className="font-mono text-muted-foreground">{taxLtPct}%</span>
+            </div>
+            <Slider value={[taxLtPct]} min={0} max={24} step={1} onValueChange={(v) => setTaxLtPct(v[0])} className="py-1" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs">
+              <Label>State on short-term gains</Label>
+              <span className="font-mono text-muted-foreground">{taxStatePct}%</span>
+            </div>
+            <Slider value={[taxStatePct]} min={0} max={15} step={1} onValueChange={(v) => setTaxStatePct(v[0])} className="py-1" />
+          </div>
+          <div className="space-y-2">
+            <div className="flex justify-between text-xs">
+              <Label>State on long-term gains</Label>
+              <span className="font-mono text-muted-foreground">{taxStateLtPct}%</span>
+            </div>
+            <Slider value={[taxStateLtPct]} min={0} max={15} step={1} onValueChange={(v) => setTaxStateLtPct(v[0])} className="py-1" />
+          </div>
+          <Button
+            size="sm"
+            disabled={taxRatesMutation.isPending}
+            onClick={() =>
+              taxRatesMutation.mutate({
+                taxFederalMarginalRate: taxFedPct / 100,
+                taxStateRate: taxStatePct / 100,
+                taxStateLongTermRate: taxStateLtPct / 100,
+                taxLongTermFedRate: taxLtPct / 100,
+                taxResidencyState: taxStateCode.length === 2 ? taxStateCode : "",
+              })
+            }
+          >
+            Save tax assumptions
+          </Button>
         </CardContent>
       </Card>
 

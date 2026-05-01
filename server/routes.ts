@@ -13,6 +13,8 @@ import { filterSymbolSuggestions, getEquitySymbolUniverse, invalidateSymbolUnive
 import { getEngineState } from "./trading-engine";
 import { runExecuteAdvisor, streamExecuteAdvisor } from "./executeAdvisor";
 import type { AdvisorMessage } from "./executeAdvisor";
+import { computeEquityRealizedForYear, estimateTaxLiabilityUsd, TAX_DISCLAIMER } from "./taxFifo";
+import { getResidencyStateInfo, normalizeStateCode } from "@shared/stateTax";
 import {
   insertTradingConfigSchema,
   tradingModeSchema,
@@ -139,6 +141,11 @@ export async function registerRoutes(
           weeklyLossLimit: 0.07,
           maxDrawdown: 0.15,
           ensembleThreshold: 0.60,
+          taxFederalMarginalRate: 0.22,
+          taxStateRate: 0.05,
+          taxStateLongTermRate: 0.05,
+          taxLongTermFedRate: 0.15,
+          taxResidencyState: "",
         });
       }
       // Never send raw encrypted keys — just indicate if they're set
@@ -312,6 +319,75 @@ export async function registerRoutes(
     } catch (e) {
       if (e instanceof z.ZodError) return res.status(400).json({ error: e.errors });
       res.status(500).json({ error: "Failed to create snapshot" });
+    }
+  });
+
+  app.get("/api/tax/summary/:mode", async (req, res) => {
+    try {
+      const mode = req.params.mode;
+      if (mode !== "paper" && mode !== "live") {
+        return res.status(400).json({ error: "Mode must be 'paper' or 'live'" });
+      }
+      const cfg = await storage.getTradingConfig();
+      if (!cfg) {
+        return res.status(400).json({ error: "Configure Settings first" });
+      }
+      const taxYear = new Date().getFullYear();
+      const allTrades = await storage.getAllTradesForMode(mode);
+      const { shortTermNet, longTermNet, sellMatches, equityRowsInYear } = computeEquityRealizedForYear(
+        allTrades,
+        taxYear,
+      );
+      const fedMarg = cfg.taxFederalMarginalRate ?? 0.22;
+      const ltFed = cfg.taxLongTermFedRate ?? 0.15;
+      const stateSt = cfg.taxStateRate ?? 0.05;
+      const stateLt = cfg.taxStateLongTermRate ?? stateSt;
+      const stateCode = normalizeStateCode(cfg.taxResidencyState ?? "");
+      const stateMeta = getResidencyStateInfo(stateCode);
+      const est = estimateTaxLiabilityUsd({
+        shortTermNet,
+        longTermNet,
+        federalMarginalRate: fedMarg,
+        longTermFedRate: ltFed,
+        stateShortTermRate: stateSt,
+        stateLongTermRate: stateLt,
+      });
+      const methodology =
+        "FIFO realized gains split into short-term vs long-term buckets (IRC holding period). Estimated tax applies your federal marginal rate to positive ST gains, federal LT rate to positive LT gains, and separate state ST/LT rates—similar to organizer lines before NOL/wash-sale adjustments.";
+      res.json({
+        taxYear,
+        tradingMode: mode,
+        shortTermNet,
+        longTermNet,
+        netRealized: shortTermNet + longTermNet,
+        estimatedFederal: est.estimatedFederal,
+        estimatedState: est.estimatedState,
+        estimatedTotalTax: est.estimatedFederal + est.estimatedState,
+        federalOnShortTerm: est.federalOnShortTerm,
+        federalOnLongTerm: est.federalOnLongTerm,
+        stateOnShortTerm: est.stateOnShortTerm,
+        stateOnLongTerm: est.stateOnLongTerm,
+        equityTradeRowsYtd: equityRowsInYear,
+        fifoSellMatches: sellMatches,
+        residencyStateCode: stateCode || null,
+        residencyStateName: stateMeta?.name ?? null,
+        residencyBasisNote: stateMeta?.basis ?? null,
+        methodology,
+        reportingHints: [
+          "Match realized amounts to brokerage 1099-B / Form 8949 totals before relying on these estimates.",
+          "State residency drives default rates in Settings; local taxes (e.g. NYC) may require manual adjustment.",
+        ],
+        rates: {
+          federalMarginal: fedMarg,
+          federalLongTerm: ltFed,
+          stateShortTerm: stateSt,
+          stateLongTerm: stateLt,
+        },
+        disclaimer: TAX_DISCLAIMER,
+      });
+    } catch (e) {
+      log(`GET /api/tax/summary: ${e instanceof Error ? e.message : String(e)}`, "express");
+      res.status(500).json({ error: "Tax summary failed" });
     }
   });
 
@@ -737,6 +813,11 @@ export async function registerRoutes(
         weeklyLossLimit: 0.07,
         maxDrawdown: 0.15,
         ensembleThreshold: 0.6,
+        taxFederalMarginalRate: 0.22,
+        taxStateRate: 0.05,
+        taxStateLongTermRate: 0.05,
+        taxLongTermFedRate: 0.15,
+        taxResidencyState: "",
       });
       config = await storage.getTradingConfig();
     }
@@ -808,6 +889,11 @@ async function seedDemoData() {
     weeklyLossLimit: 0.07,
     maxDrawdown: 0.15,
     ensembleThreshold: 0.60,
+    taxFederalMarginalRate: 0.22,
+    taxStateRate: 0.05,
+    taxStateLongTermRate: 0.05,
+    taxLongTermFedRate: 0.15,
+    taxResidencyState: "",
   });
 
   // Strategies
