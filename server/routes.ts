@@ -11,7 +11,7 @@ import * as alpaca from "./alpaca";
 import { credsFromTradingConfig } from "./brokerCreds";
 import { filterSymbolSuggestions, getEquitySymbolUniverse, invalidateSymbolUniverseCache } from "./symbolSuggest";
 import { getEngineState } from "./trading-engine";
-import { runExecuteAdvisor } from "./executeAdvisor";
+import { runExecuteAdvisor, streamExecuteAdvisor } from "./executeAdvisor";
 import type { AdvisorMessage } from "./executeAdvisor";
 import {
   insertTradingConfigSchema,
@@ -475,45 +475,57 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Last message must be from the user" });
       }
 
-      const cfg = await storage.getTradingConfig();
+      const [cfg, strats, risk] = await Promise.all([
+        storage.getTradingConfig(),
+        storage.getStrategies(),
+        storage.getActiveRiskEvents(),
+      ]);
       if (!cfg) {
         return res.status(400).json({ error: "Configure Settings first" });
       }
 
-      const strats = await storage.getStrategies();
       const strategies = strats.map((x) => ({
         name: x.name,
         enabled: Boolean(x.enabled),
       }));
 
-      const risk = await storage.getActiveRiskEvents();
       const killSwitchActive = risk.some((e) => e.eventType === "kill_switch" && e.severity === "halt");
 
       const engine = getEngineState();
+
+      const clientAbort = new AbortController();
+      const onClose = () => clientAbort.abort();
+      req.on("close", onClose);
+      const advisorSignal = AbortSignal.any([AbortSignal.timeout(115_000), clientAbort.signal]);
 
       const msgs: AdvisorMessage[] = parsed.data.messages.map((m) => ({
         role: m.role,
         content: sanitizeString(m.content).slice(0, 8000),
       }));
 
-      const out = await runExecuteAdvisor(
-        {
-          cfg,
-          strategies,
-          engineRunning: engine.running,
-          killSwitchActive,
-          draft: parsed.data.draft,
-        },
-        msgs,
-      );
+      try {
+        const out = await runExecuteAdvisor(
+          {
+            cfg,
+            strategies,
+            engineRunning: engine.running,
+            killSwitchActive,
+            draft: parsed.data.draft,
+          },
+          msgs,
+          { signal: advisorSignal },
+        );
 
-      await logAudit(
-        "execute_advisor_chat",
-        sanitizeString(msgs.filter((m) => m.role === "user").pop()?.content ?? "").slice(0, 220),
-        req,
-      );
+        await logAudit(
+          "execute_advisor_chat",
+          sanitizeString(msgs.filter((m) => m.role === "user").pop()?.content ?? "").slice(0, 220),
+          req,
+        );
 
-      res.json({ reply: out.reply });
+        res.json({ reply: out.reply });
+      } finally {
+        req.off("close", onClose);
+      }
     } catch (e) {
       log(`POST /api/execute/advisor: ${e instanceof Error ? e.message : String(e)}`, "express");
       res.status(500).json({ error: "Advisor request failed" });
@@ -521,6 +533,102 @@ export async function registerRoutes(
   });
 
 
+
+  app.post("/api/execute/advisor/stream", async (req, res) => {
+    if (!checkAdvisorChatRate(req, res)) return;
+    try {
+      const parsed = executeAdvisorSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      }
+      const last = parsed.data.messages[parsed.data.messages.length - 1];
+      if (last.role !== "user") {
+        return res.status(400).json({ error: "Last message must be from the user" });
+      }
+
+      const [cfg, strats, risk] = await Promise.all([
+        storage.getTradingConfig(),
+        storage.getStrategies(),
+        storage.getActiveRiskEvents(),
+      ]);
+      if (!cfg) {
+        return res.status(400).json({ error: "Configure Settings first" });
+      }
+
+      const strategies = strats.map((x) => ({
+        name: x.name,
+        enabled: Boolean(x.enabled),
+      }));
+
+      const killSwitchActive = risk.some((e) => e.eventType === "kill_switch" && e.severity === "halt");
+
+      const engine = getEngineState();
+
+      const clientAbort = new AbortController();
+      const onClose = () => clientAbort.abort();
+      req.on("close", onClose);
+      const advisorSignal = AbortSignal.any([AbortSignal.timeout(115_000), clientAbort.signal]);
+
+      const msgs: AdvisorMessage[] = parsed.data.messages.map((m) => ({
+        role: m.role,
+        content: sanitizeString(m.content).slice(0, 8000),
+      }));
+
+      let fullReply = "";
+      try {
+        res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("X-Accel-Buffering", "no");
+
+        for await (const delta of streamExecuteAdvisor(
+          {
+            cfg,
+            strategies,
+            engineRunning: engine.running,
+            killSwitchActive,
+            draft: parsed.data.draft,
+          },
+          msgs,
+          { signal: advisorSignal },
+        )) {
+          res.write(`${JSON.stringify({ d: delta })}\n`);
+        }
+        res.write(`${JSON.stringify({ done: true })}\n`);
+
+        await logAudit(
+          "execute_advisor_chat",
+          sanitizeString(msgs.filter((m) => m.role === "user").pop()?.content ?? "").slice(0, 220),
+          req,
+        );
+
+        res.end();
+      } catch (streamErr) {
+        if (!res.headersSent) {
+          res.status(502).json({
+            error: streamErr instanceof Error ? streamErr.message : "Advisor stream failed",
+          });
+        } else {
+          try {
+            res.write(
+              `${JSON.stringify({
+                error: streamErr instanceof Error ? streamErr.message : "Advisor stream failed",
+              })}\n`,
+            );
+          } catch {
+            /* ignore */
+          }
+          res.end();
+        }
+      } finally {
+        req.off("close", onClose);
+      }
+    } catch (e) {
+      log(`POST /api/execute/advisor/stream: ${e instanceof Error ? e.message : String(e)}`, "express");
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Advisor request failed" });
+      }
+    }
+  });
   app.get("/api/strategies", async (_req, res) => {
     const strats = await storage.getStrategies();
     res.json(strats);

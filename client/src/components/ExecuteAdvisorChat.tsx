@@ -2,14 +2,50 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Loader2, MessageSquare, OctagonAlert, Send, Trash2 } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { API_BASE } from "@/lib/queryClient";
+import { messageFromResponse } from "@/lib/parseApiError";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Link } from "wouter";
 
 export type AdvisorChatMessage = { role: "user" | "assistant"; content: string };
+
+async function consumeAdvisorNdjsonStream(res: Response, onDelta: (chunk: string) => void): Promise<void> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) continue;
+      let j: { d?: string; done?: boolean; error?: string };
+      try {
+        j = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      if (typeof j.error === "string") throw new Error(j.error);
+      if (typeof j.d === "string" && j.d.length > 0) onDelta(j.d);
+      if (j.done === true) return;
+    }
+  }
+  const tail = buf.trim();
+  if (!tail) return;
+  try {
+    const j = JSON.parse(tail) as { d?: string; done?: boolean; error?: string };
+    if (typeof j.error === "string") throw new Error(j.error);
+    if (typeof j.d === "string" && j.d.length > 0) onDelta(j.d);
+  } catch {
+    /* ignore trailing garbage */
+  }
+}
+
 
 type Props = {
   draft: {
@@ -26,18 +62,31 @@ export function ExecuteAdvisorChat({ draft, killSwitchActive }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const sendGenerationRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
   const send = async () => {
     const text = input.trim().slice(0, 8000);
     if (!text || loading || killSwitchActive) return;
     setError(null);
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const generation = ++sendGenerationRef.current;
+
     const userMsg: AdvisorChatMessage = { role: "user", content: text };
-    const next = [...messages, userMsg];
-    setMessages(next);
+    const nextUserTurn = [...messages, userMsg];
+    setMessages([...nextUserTurn, { role: "assistant", content: "" }]);
     setInput("");
     setLoading(true);
     try {
@@ -45,7 +94,7 @@ export function ExecuteAdvisorChat({ draft, killSwitchActive }: Props) {
       const body: {
         messages: AdvisorChatMessage[];
         draft?: { symbol?: string; qty?: number; side?: "buy" | "sell" };
-      } = { messages: next };
+      } = { messages: nextUserTurn };
       if (sym.length >= 1 && Number.isFinite(draft.qty) && draft.qty >= 1) {
         body.draft = {
           symbol: sym.toUpperCase(),
@@ -53,18 +102,44 @@ export function ExecuteAdvisorChat({ draft, killSwitchActive }: Props) {
           side: draft.side,
         };
       }
-      const res = await apiRequest("POST", "/api/execute/advisor", body);
-      const data = (await res.json()) as { reply?: string };
-      const reply = data.reply ?? "";
-      setMessages((prev) => [...prev, { role: "assistant", content: reply }]);
+      const res = await fetch(`${API_BASE}/api/execute/advisor/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
+      if (!res.ok) throw new Error(await messageFromResponse(res));
+      if (generation !== sendGenerationRef.current) return;
+
+      await consumeAdvisorNdjsonStream(res, (delta) => {
+        if (generation !== sendGenerationRef.current) return;
+        setMessages((prev) => {
+          const copy = [...prev];
+          const last = copy[copy.length - 1];
+          if (last?.role === "assistant") {
+            copy[copy.length - 1] = { role: "assistant", content: last.content + delta };
+          }
+          return copy;
+        });
+      });
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      if (generation !== sendGenerationRef.current) return;
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant" && last.content === "") return prev.slice(0, -1);
+        return prev;
+      });
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
-      setLoading(false);
+      if (generation === sendGenerationRef.current) {
+        setLoading(false);
+      }
     }
   };
 
   const clear = () => {
+    abortRef.current?.abort();
     setMessages([]);
     setError(null);
     setInput("");
@@ -96,7 +171,7 @@ export function ExecuteAdvisorChat({ draft, killSwitchActive }: Props) {
             </AlertDescription>
           </Alert>
         )}
-        <ScrollArea className="flex-1 rounded-md border border-border/80 bg-muted/20 min-h-[200px] max-h-[42vh] lg:max-h-none lg:flex-1">
+        <div className="flex-1 rounded-md border border-border/80 bg-muted/20 min-h-[200px] max-h-[42vh] lg:max-h-[min(28rem,50vh)] overflow-y-auto overscroll-contain">
           <div className="p-3 space-y-3">
             {messages.length === 0 && (
               <p className="text-sm text-muted-foreground">
@@ -115,18 +190,17 @@ export function ExecuteAdvisorChat({ draft, killSwitchActive }: Props) {
                 <span className="text-[10px] uppercase tracking-wide opacity-70 block mb-0.5">
                   {m.role === "user" ? "You" : "Advisor"}
                 </span>
-                <p className="whitespace-pre-wrap break-words">{m.content}</p>
+                <p className="whitespace-pre-wrap break-words">
+                  {m.role === "assistant" && !m.content && loading && (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin inline-block mr-2 align-middle text-muted-foreground" />
+                  )}
+                  {m.content}
+                </p>
               </div>
             ))}
-            {loading && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Thinking...
-              </div>
-            )}
             <div ref={bottomRef} />
           </div>
-        </ScrollArea>
+        </div>
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 

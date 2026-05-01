@@ -1,7 +1,19 @@
 import type { TradingConfig } from "@shared/schema";
-import { fetchOllamaChat } from "./ollama";
+import { fetchOllamaChat, streamOllamaChat } from "./ollama";
 
 export type AdvisorMessage = { role: "user" | "assistant"; content: string };
+
+/** Recent turns only - keeps Ollama prompt size and latency predictable for long chats. */
+const ADVISOR_MODEL_MESSAGE_CAP = 14;
+
+export function trimAdvisorMessagesForModel(messages: AdvisorMessage[]): AdvisorMessage[] {
+  if (messages.length <= ADVISOR_MODEL_MESSAGE_CAP) return messages;
+  let sliced = messages.slice(-ADVISOR_MODEL_MESSAGE_CAP);
+  while (sliced.length > 1 && sliced[0].role !== "user") {
+    sliced = sliced.slice(1);
+  }
+  return sliced.length > 0 ? sliced : messages.slice(-1);
+}
 
 export type AdvisorContext = {
   cfg: TradingConfig;
@@ -32,8 +44,8 @@ function buildSystemPrompt(ctx: AdvisorContext): string {
     "Stay within what this product supports. Do not invent features, brokers, or shortcuts.",
     "",
     "### Approved mechanisms",
-    "- Manual US equity market orders: Execute page — symbol, whole-share qty, buy/sell — routed to Alpaca for the configured paper or live mode.",
-    "- Automated loop: sidebar START runs the core cycle — Alpaca sync, rotating watchlist symbol, ensemble from weighted strategies, Ollama sentiment for that symbol, risk gates, optional equity and options automation when configured.",
+    "- Manual US equity market orders: Execute page - symbol, whole-share qty, buy/sell - routed to Alpaca for the configured paper or live mode.",
+    "- Automated loop: sidebar START runs the core cycle - Alpaca sync, rotating watchlist symbol, ensemble from weighted strategies, Ollama sentiment for that symbol, risk gates, optional equity and options automation when configured.",
     "- Options paths (wheel CSP, covered call, iron condor) run inside that engine; requires Alpaca options entitlements.",
     "- Kill switch halts trading and cancels pending broker orders.",
     "- Adjust behavior via Settings (watchlist, thresholds, risk limits, Ollama URL/model), Dashboard strategy toggles, Risk page.",
@@ -63,10 +75,32 @@ function buildSystemPrompt(ctx: AdvisorContext): string {
 export async function runExecuteAdvisor(
   ctx: AdvisorContext,
   messages: AdvisorMessage[],
+  options?: { signal?: AbortSignal },
 ): Promise<{ reply: string }> {
   const url = ctx.cfg.ollamaUrl ?? "http://localhost:11434";
   const model = ctx.cfg.ollamaModel ?? "llama3.2";
   const system = buildSystemPrompt(ctx);
-  const reply = await fetchOllamaChat(url, model, system, messages);
+  const forModel = trimAdvisorMessagesForModel(messages);
+  const reply = await fetchOllamaChat(url, model, system, forModel, {
+    temperature: 0.35,
+    numPredict: 768,
+    signal: options?.signal,
+  });
   return { reply };
+}
+
+export async function* streamExecuteAdvisor(
+  ctx: AdvisorContext,
+  messages: AdvisorMessage[],
+  options?: { signal?: AbortSignal },
+): AsyncGenerator<string, void, unknown> {
+  const url = ctx.cfg.ollamaUrl ?? "http://localhost:11434";
+  const model = ctx.cfg.ollamaModel ?? "llama3.2";
+  const system = buildSystemPrompt(ctx);
+  const forModel = trimAdvisorMessagesForModel(messages);
+  yield* streamOllamaChat(url, model, system, forModel, {
+    temperature: 0.35,
+    numPredict: 768,
+    signal: options?.signal,
+  });
 }

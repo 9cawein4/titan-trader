@@ -1,4 +1,4 @@
-﻿export async function fetchOllamaSentiment(
+export async function fetchOllamaSentiment(
   baseUrl: string,
   model: string,
   symbol: string,
@@ -39,26 +39,35 @@
   }
 }
 
+export type OllamaChatOptions = {
+  temperature?: number;
+  numPredict?: number;
+  signal?: AbortSignal;
+};
+
 /** Ollama /api/chat (non-streaming). */
 export async function fetchOllamaChat(
   baseUrl: string,
   model: string,
   systemPrompt: string,
   messages: { role: "user" | "assistant"; content: string }[],
+  chatOptions?: OllamaChatOptions,
 ): Promise<string> {
   const root = baseUrl.replace(/\/$/, "");
+  const temperature = chatOptions?.temperature ?? 0.35;
+  const numPredict = chatOptions?.numPredict ?? 1024;
   const body = {
     model,
     messages: [{ role: "system", content: systemPrompt }, ...messages],
     stream: false,
-    options: { temperature: 0.35, num_predict: 1024 },
+    options: { temperature, num_predict: numPredict },
   };
   try {
     const res = await fetch(`${root}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
+      signal: chatOptions?.signal ?? AbortSignal.timeout(120_000),
     });
     if (!res.ok) return `[Ollama chat HTTP ${res.status}]`;
     const j = (await res.json()) as { message?: { content?: string } };
@@ -67,5 +76,79 @@ export async function fetchOllamaChat(
   } catch (e) {
     const msg = e instanceof Error ? e.message : "ollama chat error";
     return msg.slice(0, 500);
+  }
+}
+/**
+ * Streams assistant token deltas from Ollama /api/chat (stream: true).
+ * Each yielded string is a delta to append (Ollama sends incremental message.content chunks).
+ */
+export async function* streamOllamaChat(
+  baseUrl: string,
+  model: string,
+  systemPrompt: string,
+  messages: { role: "user" | "assistant"; content: string }[],
+  chatOptions?: OllamaChatOptions,
+): AsyncGenerator<string, void, unknown> {
+  const root = baseUrl.replace(/\/$/, "");
+  const temperature = chatOptions?.temperature ?? 0.35;
+  const numPredict = chatOptions?.numPredict ?? 1024;
+  const body = {
+    model,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+    stream: true,
+    options: { temperature, num_predict: numPredict },
+  };
+  const signal = chatOptions?.signal ?? AbortSignal.timeout(120_000);
+  const res = await fetch(`${root}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`ollama chat HTTP ${res.status}: ${errText.slice(0, 300)}`);
+  }
+  if (!res.body) throw new Error("ollama chat: empty body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let j;
+        try {
+          j = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        const delta = j.message?.content;
+        if (typeof delta === "string" && delta.length > 0) {
+          yield delta;
+        }
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        const j = JSON.parse(tail);
+        const delta = j.message?.content;
+        if (typeof delta === "string" && delta.length > 0) {
+          yield delta;
+        }
+      } catch {
+        /* ignore trailing garbage */
+      }
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
