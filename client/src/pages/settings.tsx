@@ -39,6 +39,7 @@ import {
   Server,
   Radio,
   Landmark,
+  Globe,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -110,6 +111,8 @@ export default function Settings() {
   const [liveKey, setLiveKey] = useState("");
   const [liveSecret, setLiveSecret] = useState("");
   const [liveConfirmation, setLiveConfirmation] = useState("");
+  const [paperTradingUrl, setPaperTradingUrl] = useState("");
+  const [liveTradingUrl, setLiveTradingUrl] = useState("");
 
   const { data: config } = useQuery<TradingConfig>({
     queryKey: ["/api/config"],
@@ -136,6 +139,8 @@ export default function Settings() {
       );
       setTaxLtPct(Math.round((config.taxLongTermFedRate ?? 0.15) * 100));
       setTaxStateCode((config.taxResidencyState ?? "").trim().toUpperCase());
+      setPaperTradingUrl(config.paperTradingApiBaseUrl ?? "");
+      setLiveTradingUrl(config.liveTradingApiBaseUrl ?? "");
     }
   }, [config]);
 
@@ -179,9 +184,35 @@ export default function Settings() {
     refetchInterval: 15000,
   });
 
+  const saveTradingEndpointsMutation = useMutation({
+    mutationFn: async (patch: { paperTradingApiBaseUrl?: string; liveTradingApiBaseUrl?: string }) => {
+      await apiRequest("PATCH", "/api/config", patch);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/config"] });
+      toast({ title: "Saved", description: "Trading API base URL updated." });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
+  });
+
   const saveKeysMutation = useMutation({
-    mutationFn: async ({ tradingMode, apiKey, apiSecret }: { tradingMode: string; apiKey: string; apiSecret: string }) => {
-      await apiRequest("POST", "/api/config/api-keys", { tradingMode, apiKey, apiSecret });
+    mutationFn: async ({
+      tradingMode,
+      apiKey,
+      apiSecret,
+      tradingApiBaseUrl,
+    }: {
+      tradingMode: string;
+      apiKey: string;
+      apiSecret: string;
+      tradingApiBaseUrl?: string;
+    }) => {
+      await apiRequest("POST", "/api/config/api-keys", {
+        tradingMode,
+        apiKey,
+        apiSecret,
+        ...(tradingApiBaseUrl !== undefined ? { tradingApiBaseUrl } : {}),
+      });
     },
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["/api/config"] });
@@ -321,6 +352,34 @@ export default function Settings() {
             </div>
             <div className="space-y-2">
               <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                  <Globe className="w-3 h-3" />
+                  Trading API base URL
+                </Label>
+                <Input
+                  value={paperTradingUrl}
+                  onChange={(e) => setPaperTradingUrl(e.target.value)}
+                  placeholder="https://paper-api.alpaca.markets/v2"
+                  className="bg-muted border-border text-xs font-mono h-8 mt-1"
+                  data-testid="input-paper-trading-url"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                  Same endpoint Alpaca shows for paper trading. Host only or full URL with /v2 both work.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-xs mt-2"
+                  disabled={saveTradingEndpointsMutation.isPending}
+                  onClick={() =>
+                    saveTradingEndpointsMutation.mutate({ paperTradingApiBaseUrl: paperTradingUrl.trim() })
+                  }
+                  data-testid="button-save-paper-trading-url"
+                >
+                  Save paper endpoint
+                </Button>
+              </div>
+              <div>
                 <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">API Key</Label>
                 <div className="flex gap-2 mt-1">
                   <Input
@@ -351,7 +410,14 @@ export default function Settings() {
                 size="sm"
                 className="text-xs bg-primary text-primary-foreground"
                 disabled={!paperKey || !paperSecret || paperKey.length < 10 || saveKeysMutation.isPending}
-                onClick={() => saveKeysMutation.mutate({ tradingMode: "paper", apiKey: paperKey, apiSecret: paperSecret })}
+                onClick={() =>
+                  saveKeysMutation.mutate({
+                    tradingMode: "paper",
+                    apiKey: paperKey,
+                    apiSecret: paperSecret,
+                    tradingApiBaseUrl: paperTradingUrl.trim(),
+                  })
+                }
                 data-testid="button-save-paper-keys"
               >
                 <Lock className="w-3 h-3 mr-1.5" />
@@ -372,6 +438,34 @@ export default function Settings() {
               </Badge>
             </div>
             <div className="space-y-2">
+              <div>
+                <Label className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
+                  <Globe className="w-3 h-3" />
+                  Trading API base URL
+                </Label>
+                <Input
+                  value={liveTradingUrl}
+                  onChange={(e) => setLiveTradingUrl(e.target.value)}
+                  placeholder="https://api.alpaca.markets/v2"
+                  className="bg-muted border-border text-xs font-mono h-8 mt-1"
+                  data-testid="input-live-trading-url"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1 leading-snug">
+                  Live trading endpoint from your Alpaca dashboard.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-xs mt-2"
+                  disabled={saveTradingEndpointsMutation.isPending}
+                  onClick={() =>
+                    saveTradingEndpointsMutation.mutate({ liveTradingApiBaseUrl: liveTradingUrl.trim() })
+                  }
+                  data-testid="button-save-live-trading-url"
+                >
+                  Save live endpoint
+                </Button>
+              </div>
               <div>
                 <Label className="text-[10px] text-muted-foreground uppercase tracking-wider">API Key</Label>
                 <div className="flex gap-2 mt-1">
@@ -403,7 +497,14 @@ export default function Settings() {
                 size="sm"
                 className="text-xs bg-vice-orange text-white hover:bg-vice-orange/80"
                 disabled={!liveKey || !liveSecret || liveKey.length < 10 || saveKeysMutation.isPending}
-                onClick={() => saveKeysMutation.mutate({ tradingMode: "live", apiKey: liveKey, apiSecret: liveSecret })}
+                onClick={() =>
+                  saveKeysMutation.mutate({
+                    tradingMode: "live",
+                    apiKey: liveKey,
+                    apiSecret: liveSecret,
+                    tradingApiBaseUrl: liveTradingUrl.trim(),
+                  })
+                }
                 data-testid="button-save-live-keys"
               >
                 <Lock className="w-3 h-3 mr-1.5" />
@@ -430,21 +531,38 @@ export default function Settings() {
       </Card>
 
 
-      {/* Tax rate assumptions — residency + federal/state ST/LT */}
+      {/* Tax reporting assumptions — clearer defaults + context */}
       <Card className="bg-card border-card-border" data-testid="card-tax-rates">
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-2 space-y-1">
           <CardTitle className="text-sm font-semibold flex items-center gap-2">
             <Landmark className="w-4 h-4 text-primary" />
             Tax reporting assumptions
           </CardTitle>
+          <p className="text-[10px] text-muted-foreground font-normal leading-relaxed">
+            These percentages only affect the <span className="text-foreground/90">dashboard tax estimate</span>. They do not change orders or risk.
+            Use rough <span className="text-foreground/90">marginal</span> rates for this year (often from last year&apos;s brackets or your CPA)—not your overall effective rate.
+          </p>
         </CardHeader>
         <CardContent className="space-y-4 pb-4">
-          <p className="text-[10px] text-muted-foreground leading-relaxed">
-            Set your state of residency so state estimates follow typical treatment (ordinary vs long-term). Rates are planning defaults—replace
-            with your marginal brackets from last year&apos;s return or your CPA. Dashboard uses FIFO on logged equity trades only.
-          </p>
-          <div className="space-y-1.5">
-            <Label className="text-[10px] uppercase text-muted-foreground">State of residency</Label>
+          <details className="rounded-md border border-border/50 bg-muted/15 [&_summary::-webkit-details-marker]:hidden">
+            <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-medium text-foreground hover:bg-muted/25 rounded-md">
+              How Titan uses these numbers (tap to expand)
+            </summary>
+            <div className="space-y-2 px-3 pb-3 pt-0 border-t border-border/30">
+              <ul className="text-[10px] text-muted-foreground leading-relaxed space-y-1.5 list-disc list-inside pt-2 marker:text-primary/80">
+                <li><span className="text-foreground/90">Gains only:</span> Each slider multiplies <span className="text-foreground/90">positive</span> realized gains in that bucket; net losses are not taxed here.</li>
+                <li><span className="text-foreground/90">ST vs LT:</span> Short-term covers lots held <span className="text-foreground/90">one year or less</span>; long-term covers lots held more than one year (FIFO on logged equity trades).</li>
+                <li><span className="text-foreground/90">Federal vs state:</span> Four independent sliders. Federal uses ordinary vs preferential LT rates; state sliders follow how your residency usually treats ST/LT (defaults load from the table).</li>
+                <li><span className="text-foreground/90">Excluded:</span> Wash sales, NIIT, AMT, loss limits, options/crypto rules, multi-state or city tax—tune sliders manually if relevant.</li>
+              </ul>
+            </div>
+          </details>
+
+          <div className="space-y-2 rounded-lg border border-border/40 bg-muted/10 p-3">
+            <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">State of residency</Label>
+            <p className="text-[10px] text-muted-foreground leading-relaxed">
+              Where you file state income tax. Picking a state loads <span className="text-foreground/90">recommended</span> state ST/LT rates; you can override each slider.
+            </p>
             <Select
               value={taxStateCode || "__NONE__"}
               onValueChange={(v) => {
@@ -462,7 +580,7 @@ export default function Settings() {
               </SelectTrigger>
               <SelectContent className="max-h-[min(280px,50vh)]">
                 <SelectItem value="__NONE__" className="text-xs">
-                  Not set
+                  Not set (generic defaults only)
                 </SelectItem>
                 {sortedStates.map((st) => (
                   <SelectItem key={st.code} value={st.code} className="text-xs">
@@ -472,18 +590,12 @@ export default function Settings() {
               </SelectContent>
             </Select>
             {residencyHint && (
-              <p className="text-[10px] text-muted-foreground leading-snug border border-border/40 rounded-md p-2 bg-muted/15">
+              <p className="text-[10px] text-muted-foreground leading-snug border border-border/40 rounded-md p-2 bg-background/50">
+                <span className="font-medium text-foreground/90">Reference note for this state: </span>
                 {residencyHint}
               </p>
             )}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="text-xs"
-              disabled={!taxStateCode}
+            <Button type="button" variant="outline" size="sm" className="text-xs h-8" disabled={!taxStateCode}
               onClick={() => {
                 const info = getResidencyStateInfo(taxStateCode);
                 if (!info) return;
@@ -491,37 +603,66 @@ export default function Settings() {
                 setTaxStateLtPct(Math.round(info.defaultLongTermRate * 100));
               }}
             >
-              Reset state rates from table
+              Apply table defaults for this state
             </Button>
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs">
-              <Label>Federal marginal (short-term)</Label>
-              <span className="font-mono text-muted-foreground">{taxFedPct}%</span>
+
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Federal (IRS portion)</p>
+          <div className="rounded-lg border border-border/40 bg-muted/10 p-3 space-y-2">
+            <div className="flex justify-between gap-3 items-start">
+              <div className="min-w-0 space-y-1">
+                <Label className="text-xs text-foreground">Short-term gains rate</Label>
+                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                  Federal tax on profits from sales held <span className="text-foreground/90">one year or less</span> (ordinary-income treatment).
+                </p>
+              </div>
+              <span className="font-mono text-xs text-muted-foreground shrink-0 tabular-nums">{taxFedPct}%</span>
             </div>
             <Slider value={[taxFedPct]} min={0} max={37} step={1} onValueChange={(v) => setTaxFedPct(v[0])} className="py-1" />
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs">
-              <Label>Federal long-term capital gains</Label>
-              <span className="font-mono text-muted-foreground">{taxLtPct}%</span>
+          <div className="rounded-lg border border-border/40 bg-muted/10 p-3 space-y-2">
+            <div className="flex justify-between gap-3 items-start">
+              <div className="min-w-0 space-y-1">
+                <Label className="text-xs text-foreground">Long-term capital gains rate</Label>
+                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                  Preferential federal rate on gains from stock held <span className="text-foreground/90">more than one year</span>.
+                </p>
+              </div>
+              <span className="font-mono text-xs text-muted-foreground shrink-0 tabular-nums">{taxLtPct}%</span>
             </div>
             <Slider value={[taxLtPct]} min={0} max={24} step={1} onValueChange={(v) => setTaxLtPct(v[0])} className="py-1" />
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs">
-              <Label>State on short-term gains</Label>
-              <span className="font-mono text-muted-foreground">{taxStatePct}%</span>
+
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">State (residency portion)</p>
+          <div className="rounded-lg border border-border/40 bg-muted/10 p-3 space-y-2">
+            <div className="flex justify-between gap-3 items-start">
+              <div className="min-w-0 space-y-1">
+                <Label className="text-xs text-foreground">Short-term gains (state)</Label>
+                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                  State tax on short-term profits—often tracks ordinary state rates.
+                </p>
+              </div>
+              <span className="font-mono text-xs text-muted-foreground shrink-0 tabular-nums">{taxStatePct}%</span>
             </div>
             <Slider value={[taxStatePct]} min={0} max={15} step={1} onValueChange={(v) => setTaxStatePct(v[0])} className="py-1" />
           </div>
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs">
-              <Label>State on long-term gains</Label>
-              <span className="font-mono text-muted-foreground">{taxStateLtPct}%</span>
+          <div className="rounded-lg border border-border/40 bg-muted/10 p-3 space-y-2">
+            <div className="flex justify-between gap-3 items-start">
+              <div className="min-w-0 space-y-1">
+                <Label className="text-xs text-foreground">Long-term gains (state)</Label>
+                <p className="text-[10px] text-muted-foreground leading-relaxed">
+                  Often matches short-term where both are taxed as ordinary income; set separately if your state differs.
+                </p>
+              </div>
+              <span className="font-mono text-xs text-muted-foreground shrink-0 tabular-nums">{taxStateLtPct}%</span>
             </div>
             <Slider value={[taxStateLtPct]} min={0} max={15} step={1} onValueChange={(v) => setTaxStateLtPct(v[0])} className="py-1" />
           </div>
+
+          <div className="rounded-md border border-dashed border-border/60 bg-muted/5 px-3 py-2 text-[10px] text-muted-foreground leading-relaxed">
+            Saving updates your Titan config and the dashboard tax card. Cross-check with broker Form <span className="text-foreground/90">8949 / Schedule D</span> figures—not tax advice.
+          </div>
+
           <Button
             size="sm"
             disabled={taxRatesMutation.isPending}

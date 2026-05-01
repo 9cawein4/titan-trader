@@ -1,5 +1,5 @@
 ﻿import type { TradingConfig } from "@shared/schema";
-import type { AlpacaCredentials } from "./alpaca";
+import { resolveAlpacaTradingBaseUrl, type AlpacaCredentials } from "./alpaca";
 import { decryptSecret } from "./secrets";
 
 export type BrokerCredsResult =
@@ -28,5 +28,7 @@ export function credsFromTradingConfig(cfg: TradingConfig | undefined): BrokerCr
       error: "Could not decrypt API keys — set TITAN_ENCRYPTION_KEY and re-save keys in Settings",
     };
   }
-  return { ok: true, creds: { keyId, secretKey, paper }, mode };
+  const stored = paper ? cfg.paperTradingApiBaseUrl : cfg.liveTradingApiBaseUrl;
+  const tradingBaseUrl = resolveAlpacaTradingBaseUrl(stored ?? undefined, paper);
+  return { ok: true, creds: { keyId, secretKey, paper, tradingBaseUrl }, mode };
 }

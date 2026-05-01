@@ -61,6 +61,18 @@ function ensureTradingConfigTaxColumns(): void {
 }
 ensureTradingConfigTaxColumns();
 
+function ensureTradingConfigAlpacaTradingUrlColumns(): void {
+  const cols = sqlite.prepare("PRAGMA table_info(trading_config)").all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("paper_trading_api_base_url")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN paper_trading_api_base_url TEXT;");
+  }
+  if (!names.has("live_trading_api_base_url")) {
+    sqlite.exec("ALTER TABLE trading_config ADD COLUMN live_trading_api_base_url TEXT;");
+  }
+}
+ensureTradingConfigAlpacaTradingUrlColumns();
+
 export const db = drizzle(sqlite);
 
 export interface IStorage {

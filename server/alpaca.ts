@@ -1,9 +1,31 @@
-﻿/** Minimal Alpaca Trading API v2 + Data API client (fetch). */
+/** Minimal Alpaca Trading API v2 + Data API client (fetch). */
 
-export type AlpacaCredentials = { keyId: string; secretKey: string; paper: boolean };
+export type AlpacaCredentials = {
+  keyId: string;
+  secretKey: string;
+  paper: boolean;
+  /** Resolved Trading API base (Alpaca dashboard URL ending in /v2 is normalized away). */
+  tradingBaseUrl: string;
+};
 
-function baseTradeUrl(paper: boolean): string {
-  return paper ? "https://paper-api.alpaca.markets" : "https://api.alpaca.markets";
+const DEFAULT_TRADING_BASE_PAPER = "https://paper-api.alpaca.markets";
+const DEFAULT_TRADING_BASE_LIVE = "https://api.alpaca.markets";
+
+/** Resolve Trading API base URL. Accepts host-only or full URL including optional /v2 suffix (Alpaca dashboard style). */
+export function resolveAlpacaTradingBaseUrl(input: string | null | undefined, paper: boolean): string {
+  const fallback = paper ? DEFAULT_TRADING_BASE_PAPER : DEFAULT_TRADING_BASE_LIVE;
+  const raw = (input ?? "").trim();
+  if (!raw) return fallback;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return fallback;
+    let combined = `${u.origin}${u.pathname.replace(/\/+$/, "")}`;
+    combined = combined.replace(/\/v2$/i, "");
+    const trimmed = combined.replace(/\/+$/, "");
+    return trimmed || u.origin;
+  } catch {
+    return fallback;
+  }
 }
 
 const DATA_URL = "https://data.alpaca.markets";
@@ -34,7 +56,8 @@ async function tradeJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ ok: boolean; status: number; data?: T }> {
-  const url = `${baseTradeUrl(creds.paper)}${path}`;
+  const base = creds.tradingBaseUrl.replace(/\/+$/, "");
+  const url = `${base}${path}`;
   const res = await fetch(url, {
     ...init,
     headers: {

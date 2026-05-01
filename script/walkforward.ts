@@ -4,7 +4,7 @@
  */
 import { getStockBars } from "../server/alpaca";
 import { decryptSecret } from "../server/secrets";
-import type { AlpacaCredentials } from "../server/alpaca";
+import { resolveAlpacaTradingBaseUrl, type AlpacaCredentials } from "../server/alpaca";
 import { storage } from "../server/storage";
 import { resolveDbPath } from "../server/paths";
 import {
@@ -22,7 +22,13 @@ import "dotenv/config";
 function credsFromEnv(): AlpacaCredentials | null {
   const k = process.env.TITAN_PAPER_KEY;
   const s = process.env.TITAN_PAPER_SECRET;
-  if (k && s) return { keyId: k, secretKey: s, paper: true };
+  if (k && s)
+    return {
+      keyId: k,
+      secretKey: s,
+      paper: true,
+      tradingBaseUrl: resolveAlpacaTradingBaseUrl(process.env.TITAN_ALPACA_TRADING_BASE_URL, true),
+    };
   return null;
 }
 
@@ -42,7 +48,13 @@ async function main() {
     if (cfg?.paperApiKey && cfg?.paperApiSecret) {
       const keyId = decryptSecret(cfg.paperApiKey);
       const secretKey = decryptSecret(cfg.paperApiSecret);
-      if (keyId && secretKey) creds = { keyId, secretKey, paper: true };
+      if (keyId && secretKey)
+        creds = {
+          keyId,
+          secretKey,
+          paper: true,
+          tradingBaseUrl: resolveAlpacaTradingBaseUrl(cfg.paperTradingApiBaseUrl ?? undefined, true),
+        };
     }
   }
   if (!creds) {

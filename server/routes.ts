@@ -221,15 +221,21 @@ export async function registerRoutes(
   // ─── API Keys (encrypted at rest) ───
   app.post("/api/config/api-keys", async (req, res) => {
     try {
-      const { tradingMode, apiKey, apiSecret } = apiKeySchema.parse(req.body);
+      const { tradingMode, apiKey, apiSecret, tradingApiBaseUrl } = apiKeySchema.parse(req.body);
 
-      const update: Record<string, string> = {};
+      const update: Record<string, string | null> = {};
       if (tradingMode === "paper") {
         update.paperApiKey = encrypt(apiKey);
         update.paperApiSecret = encrypt(apiSecret);
       } else {
         update.liveApiKey = encrypt(apiKey);
         update.liveApiSecret = encrypt(apiSecret);
+      }
+      if (tradingApiBaseUrl !== undefined) {
+        const trimmed = tradingApiBaseUrl.trim();
+        const urlOrNull = trimmed === "" ? null : trimmed;
+        if (tradingMode === "paper") update.paperTradingApiBaseUrl = urlOrNull;
+        else update.liveTradingApiBaseUrl = urlOrNull;
       }
 
       await storage.upsertTradingConfig(update as any);

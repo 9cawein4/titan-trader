@@ -8,8 +8,10 @@ export const tradingConfig = sqliteTable("trading_config", {
   tradingMode: text("trading_mode").notNull().default("paper"), // "paper" | "live"
   paperApiKey: text("paper_api_key"), // encrypted
   paperApiSecret: text("paper_api_secret"), // encrypted
+  paperTradingApiBaseUrl: text("paper_trading_api_base_url"),
   liveApiKey: text("live_api_key"), // encrypted
   liveApiSecret: text("live_api_secret"), // encrypted
+  liveTradingApiBaseUrl: text("live_trading_api_base_url"),
   ollamaUrl: text("ollama_url").default("http://localhost:11434"),
   ollamaModel: text("ollama_model").default("deepseek-r1:latest"),
   watchlist: text("watchlist").default("AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,SPY,QQQ,IWM"),
@@ -41,6 +43,8 @@ export const insertTradingConfigSchema = createInsertSchema(tradingConfig).omit(
   taxStateLongTermRate: z.number().min(0).max(0.15).optional(),
   taxLongTermFedRate: z.number().min(0).max(0.24),
   taxResidencyState: z.union([z.literal(""), z.string().length(2)]).optional(),
+  paperTradingApiBaseUrl: z.union([z.literal(""), z.string().url()]).optional(),
+  liveTradingApiBaseUrl: z.union([z.literal(""), z.string().url()]).optional(),
 });
 export type InsertTradingConfig = z.infer<typeof insertTradingConfigSchema>;
 export type TradingConfig = typeof tradingConfig.$inferSelect;
@@ -238,5 +242,6 @@ export const apiKeySchema = z.object({
   tradingMode: z.enum(["paper", "live"]),
   apiKey: z.string().min(10).max(100),
   apiSecret: z.string().min(10).max(100),
+  tradingApiBaseUrl: z.union([z.literal(""), z.string().url()]).optional(),
 });
 

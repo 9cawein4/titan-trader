@@ -2,7 +2,7 @@ import type { TradingConfig } from "@shared/schema";
 import { storage } from "./storage";
 import { decryptSecret, hmacSignPayload } from "./secrets";
 import * as alpaca from "./alpaca";
-import type { AlpacaCredentials } from "./alpaca";
+import { resolveAlpacaTradingBaseUrl, type AlpacaCredentials } from "./alpaca";
 import {
   rsi,
   zScoreReturn,
@@ -54,7 +54,9 @@ function getCreds(cfg: TradingConfig): AlpacaCredentials | null {
   const keyId = decryptSecret(ek);
   const secretKey = decryptSecret(es);
   if (!keyId || !secretKey) return null;
-  return { keyId, secretKey, paper };
+  const stored = paper ? cfg.paperTradingApiBaseUrl : cfg.liveTradingApiBaseUrl;
+  const tradingBaseUrl = resolveAlpacaTradingBaseUrl(stored ?? undefined, paper);
+  return { keyId, secretKey, paper, tradingBaseUrl };
 }
 
 async function killSwitchEngaged(): Promise<boolean> {
